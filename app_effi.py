@@ -33,10 +33,10 @@ except Exception:
     pytesseract = None
 
 try:
-    from rapidfuzz import fuzz, process
+    from rapidfuzz import fuzz, process as rf_process
 except Exception:
     fuzz = None
-    process = None
+    rf_process = None
 
 
 APP_TITLE = "Effi – Procesador de Facturas e Importación"
@@ -159,6 +159,13 @@ def normalize_text(value):
 def parse_number(value):
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
+    if isinstance(value, (list, tuple)):
+        # OCR / findall a veces deja listas en celdas; tomar el primer número usable.
+        for item in value:
+            parsed = parse_number(item)
+            if parsed is not None:
+                return parsed
+        return None
     if isinstance(value, (int, float)):
         return float(value)
     s = str(value).strip().replace("$", "").replace("%", "").replace(" ", "")
@@ -181,6 +188,24 @@ def parse_number(value):
         return float(s)
     except Exception:
         return None
+
+
+def excel_safe_value(value):
+    """openpyxl solo acepta escalares; listas/dicts rompen la exportación."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        return " | ".join(excel_safe_value(v) if not isinstance(v, str) else v for v in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return value
 
 def parse_money_series(series):
     return series.map(parse_number)
@@ -342,20 +367,75 @@ def similarity(a, b):
     A, B = set(a.split()), set(b.split())
     return len(A & B) / max(1, len(A | B))
 
-def match_catalog_item(description, presentation, catalog, cols):
+
+def build_catalog_index(catalog, cols):
+    """Índice GTIN + textos precomputados para cruce O(1)/fuzzy rápido."""
+    gtin_map = {}
+    if cols.get("gtin"):
+        for idx, raw in catalog[cols["gtin"]].items():
+            gtin = clean_gtin(raw)
+            if gtin and gtin not in gtin_map:
+                gtin_map[gtin] = idx
+
+    texts = []
+    indices = []
+    for idx, row in catalog.iterrows():
+        parts = []
+        for k in ("description", "presentation", "brand"):
+            col = cols.get(k)
+            if col:
+                parts.append(str(row.get(col, "") or ""))
+        text = normalize_text(" ".join(parts))
+        if text:
+            texts.append(text)
+            indices.append(idx)
+
+    return {"gtin_map": gtin_map, "texts": texts, "indices": indices}
+
+
+def match_catalog_item(description, presentation, catalog, cols, catalog_index=None):
     query = f"{description or ''} {presentation or ''}".strip()
     qn = normalize_text(query)
     if not qn:
         return None, 0, "Sin descripción"
 
+    # GTIN embebido en la descripción (prioridad máxima)
+    qgt = clean_gtin(description)
+    if qgt and catalog_index and qgt in catalog_index["gtin_map"]:
+        idx = catalog_index["gtin_map"][qgt]
+        return catalog.loc[idx], 1.0, "GTIN en descripción"
+
+    if catalog_index and catalog_index["texts"]:
+        texts = catalog_index["texts"]
+        indices = catalog_index["indices"]
+        if rf_process and fuzz:
+            result = rf_process.extractOne(
+                qn,
+                texts,
+                scorer=fuzz.token_set_ratio,
+                score_cutoff=1,
+            )
+            if result is None:
+                return None, 0, "Fuzzy"
+            _match, score100, pos = result
+            return catalog.loc[indices[pos]], score100 / 100.0, "Fuzzy"
+
+        best = None
+        best_score = 0
+        for pos, text in enumerate(texts):
+            score = similarity(qn, text)
+            if score > best_score:
+                best_score = score
+                best = indices[pos]
+        return (catalog.loc[best] if best is not None else None), best_score, "Fuzzy"
+
+    # Fallback legacy (sin índice)
     best = None
     best_score = 0
     for idx, row in catalog.iterrows():
-        text = " ".join(str(row.get(cols[k], "") or "") for k in ["description", "presentation", "brand"])
+        text = " ".join(str(row.get(cols[k], "") or "") for k in ["description", "presentation", "brand"] if cols.get(k))
         score = similarity(query, text)
-        # Strong GTIN/codes, if description happens to contain one
-        qgt = clean_gtin(description)
-        if qgt and cols["gtin"]:
+        if qgt and cols.get("gtin"):
             cgt = clean_gtin(row.get(cols["gtin"], ""))
             if qgt and cgt and qgt == cgt:
                 score = 1.0
@@ -684,7 +764,11 @@ def find_additional_charges(text):
         n = normalize_text(line)
         if any(k in n for k in keywords):
             vals = re.findall(MONEY_RE, line)
-            out.append({"concepto": line.strip(), "valores_detectados": vals})
+            # Unir a texto: openpyxl no acepta listas en celdas.
+            out.append({
+                "concepto": line.strip(),
+                "valores_detectados": " | ".join(v.strip() for v in vals) if vals else "",
+            })
     return out
 
 def detect_bonus(text):
@@ -738,6 +822,7 @@ def make_workbook(main_rows, audit_tables):
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for r_idx, row in enumerate(main_rows, 2):
         for c_idx, value in enumerate(row, 1):
+            value = excel_safe_value(value)
             # Force GTIN and all identifiers to plain text.
             if c_idx == 1 and value is not None:
                 value = str(value)
@@ -761,7 +846,7 @@ def make_workbook(main_rows, audit_tables):
             sh.cell(1, c).alignment = Alignment(wrap_text=True, vertical="center")
         for r, values in enumerate(df.itertuples(index=False, name=None), 2):
             for c, value in enumerate(values, 1):
-                sh.cell(r, c, value)
+                sh.cell(r, c, excel_safe_value(value))
         for c in range(1, sh.max_column + 1):
             sh.column_dimensions[get_column_letter(c)].width = min(45, max(14, len(str(sh.cell(1,c).value or "")) + 2))
         sh.freeze_panes = "A2"
@@ -938,25 +1023,32 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
     total_exported = 0.0
     total_omitted = 0.0
 
+    catalog_index = build_catalog_index(catalog_df, catalog_cols)
+    logger.info(
+        "Índice de catálogo listo: %s GTINs, %s textos para fuzzy.",
+        len(catalog_index["gtin_map"]),
+        len(catalog_index["texts"]),
+    )
+
     for i, raw in invoice_df.iterrows():
         row = raw.to_dict()
-        desc = row.get("description", "") or ""
-        pres = row.get("presentation", "") or ""
+        desc = str(row.get("description", "") or "")
+        pres = str(row.get("presentation", "") or "")
         code = clean_gtin(row.get("code", ""))
 
-        # Exact GTIN first
+        # Exact GTIN first (mapa O(1), sin filtrar el DataFrame en cada línea)
         catalog_row = None
         score = 0
         method = ""
-        if code and catalog_cols["gtin"]:
-            candidates = catalog_df[catalog_df[catalog_cols["gtin"]].map(clean_gtin) == code]
-            if len(candidates):
-                catalog_row = candidates.iloc[0]
-                score = 1.0
-                method = "GTIN exacto"
+        if code and code in catalog_index["gtin_map"]:
+            catalog_row = catalog_df.loc[catalog_index["gtin_map"][code]]
+            score = 1.0
+            method = "GTIN exacto"
 
         if catalog_row is None:
-            catalog_row, score, method = match_catalog_item(desc, pres, catalog_df, catalog_cols)
+            catalog_row, score, method = match_catalog_item(
+                desc, pres, catalog_df, catalog_cols, catalog_index=catalog_index
+            )
 
         qty = parse_number(row.get("quantity")) or 0.0
         unit_inv = parse_number(row.get("unit_price_invoice")) or 0.0
