@@ -1,0 +1,7 @@
+# Revisión obligatoria para cambios sensibles.
+# Ajusta el usuario/equipo si el responsable real es otro.
+* @eriksc2006
+
+.github/ @eriksc2006
+src/ @eriksc2006
+tests/ @eriksc2006
