@@ -1,0 +1,73 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Variables de entorno y secretos
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Herramientas de testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Herramientas de calidad
+.mypy_cache/
+.ruff_cache/
+.pyre/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Archivos temporales
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# Salidas generadas por la aplicación
+salidas/
+
+# Datos locales que no deben versionarse
+data/local/
+data/private/
+
+# Secretos de Streamlit
+.streamlit/secrets.toml
+
+# Cobertura / reportes generados
+coverage.xml
+pytest-report.xml
+
+# Archivos OCR locales o paquetes de idioma descargados manualmente
+tessdata/
+
+# No ignorar globalmente XLSX/CSV:
+# pueden existir plantillas o fixtures de prueba que sí deban versionarse.

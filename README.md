@@ -1,50 +1,58 @@
-# Effi Processor
+# Effi Processor — Script-Facturas
 
-Aplicación Python para procesar facturas, documentos y listados de compras y generar una plantilla de importación compatible con Effi, manteniendo una separación estricta entre datos de importación y cálculos/auditoría.
+**Versión:** 0.1.0  
+**Propósito:** procesar facturas y listas de compra, relacionarlas con el catálogo maestro de Effi y generar archivos Excel compatibles con la importación de Effi.
 
-## Descripción
+## ¿Qué hace?
 
-El proyecto está diseñado con enfoque de **Software Quality Assurance (SQA)** y trazabilidad. Sus objetivos principales son:
+Effi Processor permite:
 
-- Cruzar productos de una factura contra un catálogo maestro Effi.
-- Priorizar coincidencias por GTIN y utilizar coincidencia semántica como mecanismo secundario.
-- Convertir presentaciones y unidades cuando exista una equivalencia matemática confiable.
-- Prorratear costos cuando se detecten unidades bonificadas.
-- Mantener descuentos calculados individualmente por artículo.
-- Omitir productos que no tengan una coincidencia suficiente en el catálogo.
-- Registrar productos omitidos para su creación posterior en Effi.
-- Generar una hoja `Plantilla_Importacion` sin fórmulas.
-- Generar hojas de auditoría y un archivo de log.
-- Validar calidad, formato, pruebas y dependencias mediante GitHub Actions.
+- Cargar un catálogo maestro Effi en CSV/XLSX.
+- Procesar una o varias facturas o listas de compra.
+- Trabajar con PDF, imágenes, Excel, CSV y TXT.
+- Extraer información mediante lectura de archivos y OCR para documentos escaneados/imágenes.
+- Priorizar coincidencias por GTIN y utilizar coincidencia aproximada cuando no existe GTIN.
+- Normalizar presentaciones y unidades.
+- Resolver conversiones como g/ml/kg/L, galón y presentaciones equivalentes cuando la información disponible permite hacerlo.
+- Prorratear correctamente costos de bonificaciones.
+- Aplicar descuentos individuales.
+- Manejar IVA configurable.
+- Omitir coincidencias de baja confianza para evitar asignaciones incorrectas.
+- Generar una plantilla Excel para Effi y archivos de auditoría/verificación.
 
-> **Principio de seguridad:** ante una coincidencia dudosa, el sistema debe preferir marcar el artículo para revisión antes que asignarle un código Effi incorrecto.
+## Regla de seguridad de datos
+
+El sistema **no debe inventar códigos Effi**. Cuando una coincidencia no alcanza el nivel de confianza establecido, el artículo debe quedar fuera de la plantilla principal y registrarse para revisión.
 
 ## Requisitos
 
-- Python 3.10 o superior.
-- Git.
-- Cuenta/repositorio de GitHub para CI/CD.
-- Tesseract OCR si se procesan imágenes o PDF escaneados.
-- Sistema operativo Windows, macOS o Linux.
+- Python >= 3.10
+- Tesseract OCR para procesamiento OCR
+- Git
+- Windows, macOS o Linux
 
-## Instalación
+## Instalación rápida
 
-```bash
-git clone <https://github.com/eriksc2006/Script-Facturas.git>
-cd effi-processor
+Crear entorno virtual:
 
-python -m venv .venv
-```
-
-### Windows
+### Windows PowerShell
 
 ```powershell
-.venv\Scripts\activate
+py -3.10 -m venv .venv
+.venv\Scripts\Activate.ps1
 ```
 
-### Linux/macOS
+### Windows CMD
+
+```cmd
+py -3.10 -m venv .venv
+.venv\Scripts\activate.bat
+```
+
+### macOS / Linux
 
 ```bash
+python3 -m venv .venv
 source .venv/bin/activate
 ```
 
@@ -55,142 +63,177 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Copiar la configuración:
+Para desarrollo:
 
 ```bash
-cp .env.example .env
+pip install -r requirements-dev.txt
 ```
 
-En Windows PowerShell:
+## Tesseract OCR
 
-```powershell
-Copy-Item .env.example .env
-```
+Debe estar instalado en el sistema y disponer de los idiomas español e inglés.
 
-## Uso
-
-La interfaz principal puede ejecutarse con Streamlit:
+En Ubuntu/Debian:
 
 ```bash
-streamlit run app_effI.py
+sudo apt update
+sudo apt install tesseract-ocr tesseract-ocr-spa tesseract-ocr-eng
 ```
 
-Si el archivo principal se reorganiza como módulo dentro de `src`, puede ejecutarse según la entrada definida por el proyecto.
+Comprobar:
 
-### Flujo recomendado
+```bash
+tesseract --version
+tesseract --list-langs
+```
 
-1. Cargar el catálogo maestro Effi.
-2. Cargar la factura/listado.
-3. Revisar las columnas detectadas.
-4. Procesar.
-5. Revisar las alertas y coincidencias dudosas.
-6. Revisar `Calculos_y_Verificaciones`.
-7. Confirmar que los productos omitidos hayan sido creados en Effi antes de reprocesar.
-8. Descargar la plantilla final.
-9. Conservar el log como evidencia de ejecución.
+Debe aparecer, como mínimo, `spa` y `eng`.
 
-## Variables de entorno
+> La configuración exacta de la ruta de Tesseract en Windows depende de la implementación actual de `app_effi.py`. No asumir una variable de entorno hasta confirmar que el código la consume.
 
-| Variable | Valor ejemplo | Descripción |
-|---|---:|---|
-| `EFFI_TAX_RATE` | `0.19` | Tasa de IVA utilizada por defecto. |
-| `EFFI_MATCH_THRESHOLD` | `0.82` | Confianza mínima para aceptar una coincidencia automática. |
-| `EFFI_LOG_LEVEL` | `INFO` | Nivel de detalle del log. |
+## Ejecutar la aplicación
 
-**Nunca** suba `.env`, credenciales, tokens o documentos comerciales reales al repositorio.
+```bash
+streamlit run app_effi.py
+```
 
-## Tests
+Streamlit mostrará la dirección local de la aplicación.
 
-Ejecutar todas las pruebas:
+## Flujo de trabajo
+
+1. Cargar el catálogo maestro de Effi.
+2. Cargar una o varias facturas/documentos.
+3. Revisar la vista previa.
+4. Ajustar IVA y umbral de coincidencia, si están disponibles.
+5. Ejecutar el procesamiento.
+6. Revisar productos encontrados, omitidos y verificaciones.
+7. Descargar el Excel.
+8. Revisar la hoja de auditoría.
+9. Crear en Effi los productos omitidos cuando corresponda.
+10. Reprocesar si es necesario.
+11. Importar el archivo en Effi.
+
+## Excel de salida
+
+La primera hoja debe llamarse exactamente:
+
+`Plantilla_Importacion`
+
+Esta hoja está destinada exclusivamente a la importación y debe contener **valores/texto planos**, sin fórmulas de Excel.
+
+Entre los encabezados confirmados del formato Effi se encuentran:
+
+- `Artículo (ID EFFI | Código de barras GTIN | Serie)`
+- `Observación`
+- `Cantidad *`
+- `Precio ud. *`
+- `Valor descuento total. *`
+- `Código Effi Impuesto`
+
+> Los 9 encabezados completos deben confirmarse contra la plantilla vigente de importación de Effi antes de publicar una versión definitiva. No se inventan aquí los encabezados restantes.
+
+Los cálculos, conversiones, alertas y omisiones deben quedar fuera de la hoja principal, principalmente en:
+
+`Calculos_y_Verificaciones`
+
+y/o en las hojas de auditoría que realmente estén implementadas.
+
+## Reglas de cálculo
+
+### Bonificaciones
+
+Cuando una compra incluye unidades pagadas y unidades gratuitas, el costo real debe distribuirse sobre el total de unidades recibidas cuando corresponda.
+
+Ejemplo:
+
+- 10 unidades pagadas.
+- 2 unidades gratis.
+- Total recibido: 12.
+- Valor pagado: $100.000.
+
+Costo unitario efectivo:
+
+`100.000 / 12 = 8.333,33`
+
+Si la bonificación es únicamente un concepto promocional sin costo y la lógica definida para el caso requiere descuento total, debe registrarse como tal en la auditoría.
+
+### Descuentos
+
+Los descuentos individuales deben conservarse por producto. No se debe aplicar un descuento global uniforme a todos los artículos salvo que el documento indique realmente que es global y las reglas de procesamiento lo permitan.
+
+### IVA
+
+El IVA debe ser configurable. Si el precio recibido ya incluye IVA, primero se debe obtener la base neta:
+
+`Base = Precio con IVA / (1 + IVA)`
+
+Con IVA del 19 %:
+
+`Base = Precio con IVA / 1,19`
+
+## Coincidencias
+
+Prioridad recomendada:
+
+1. GTIN exacto.
+2. Código/referencia exacta cuando corresponda.
+3. Nombre normalizado.
+4. Coincidencia aproximada/semántica.
+5. Conversión de presentación/unidad.
+6. Validación de confianza.
+
+Las coincidencias de baja confianza se omiten de la plantilla principal.
+
+## Estructura del proyecto
+
+```text
+Script-Facturas/
+├── app_effi.py
+├── requirements.txt
+├── requirements-dev.txt
+├── .env.example
+├── .gitignore
+├── README.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+├── docs/
+│   ├── INSTALACION.md
+│   ├── USO.md
+│   └── ARQUITECTURA.md
+├── src/
+│   └── effi_processor/
+├── tests/
+└── salidas/
+```
+
+Los nombres internos concretos de los módulos dentro de `src/effi_processor/` deben mantenerse alineados con la implementación real.
+
+## Calidad y pruebas
+
+Comandos recomendados:
 
 ```bash
 pytest
+black . --check
+flake8 .
+bandit -r src app_effi.py
+pip-audit
 ```
 
-Con cobertura:
+## Seguridad y privacidad
 
-```bash
-pytest --cov=src/effi_processor --cov-report=term-missing
-```
+No subir al repositorio:
 
-## Calidad de código
+- Facturas reales.
+- Catálogos reales con información confidencial.
+- Credenciales.
+- Tokens.
+- Contraseñas.
+- Archivos `.env`.
+- Archivos generados con información sensible.
 
-Formatear:
-
-```bash
-black src tests
-```
-
-Verificar formato:
-
-```bash
-black --check src tests
-```
-
-Lint:
-
-```bash
-flake8 src tests
-```
-
-Seguridad:
-
-```bash
-bandit -r src -ll
-pip-audit -r requirements.txt
-```
-
-## GitHub Actions
-
-El workflow `.github/workflows/ci.yml` se ejecuta automáticamente en:
-
-- Pull Requests hacia `main`.
-- Pushes hacia `main`.
-
-Comprueba:
-
-1. Black.
-2. Flake8.
-3. Pytest + cobertura.
-4. Bandit.
-5. `pip-audit`.
-6. Gitleaks para detección de secretos.
-
-Además, las pruebas se ejecutan sobre Python 3.10, 3.11, 3.12 y 3.13.
-
-## Estructura
-
-```text
-effi-processor/
-├── .github/
-│   └── workflows/
-│       └── ci.yml
-├── src/
-│   └── effi_processor/
-│       ├── __init__.py
-│       └── quality_rules.py
-├── tests/
-│   └── test_quality_rules.py
-├── .env.example
-├── .gitignore
-├── .pre-commit-config.yaml
-├── pyproject.toml
-├── requirements.txt
-├── requirements-dev.txt
-└── README.md
-```
-
-## Política de calidad
-
-Una modificación no debe fusionarse a `main` si:
-
-- Rompe las pruebas.
-- Introduce errores de linting.
-- No cumple el formato Black.
-- Introduce vulnerabilidades detectables.
-- Expone secretos.
-- Modifica accidentalmente la estructura de la plantilla Effi.
+Usar datos sintéticos para pruebas.
 
 ## Licencia
 
-Añadir aquí la licencia elegida por el propietario del proyecto.
+**Pendiente de confirmar.** Definir la licencia del proyecto antes de realizar una publicación pública.
