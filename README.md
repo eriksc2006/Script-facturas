@@ -28,6 +28,7 @@ El sistema **no debe inventar códigos Effi**. Cuando una coincidencia no alcanz
 
 - Python >= 3.10
 - Tesseract OCR para procesamiento OCR
+- (Opcional) [Ollama](https://ollama.com) en local para extraer líneas de PDF/imagen/TXT sin APIs de pago
 - Git
 - Windows, macOS o Linux
 

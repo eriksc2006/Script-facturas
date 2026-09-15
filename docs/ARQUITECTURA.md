@@ -260,6 +260,7 @@ Usar fixtures sintéticos para las pruebas.
 | PDF | PyMuPDF |
 | Imágenes | Pillow |
 | OCR | Tesseract / pytesseract |
+| Extracción LLM local (opcional) | Ollama (`llama3.2` u otro modelo local) |
 | Matching | rapidfuzz |
 | Pruebas | pytest |
 | Formato | black |

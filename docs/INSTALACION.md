@@ -87,7 +87,28 @@ tesseract --version
 tesseract --list-langs
 ```
 
-## 7. Ejecutar
+## 7. Ollama (opcional, gratuito y local)
+
+Ollama no sustituye a Tesseract: toma el texto ya leído (PDF/OCR) y estructura las líneas cuando el parser tradicional no alcanza.
+
+1. Instalar Ollama desde https://ollama.com (Windows, macOS o Linux). Es gratuito y corre en el equipo.
+2. En una terminal:
+
+```bash
+ollama pull llama3.2
+```
+
+3. Dejar Ollama en ejecución (el icono de Windows o `ollama serve`).
+4. En la barra lateral de Streamlit, activar **Usar Ollama** cuando el estado sea verde.
+
+Variables opcionales:
+
+- `OLLAMA_HOST` (por defecto `http://127.0.0.1:11434`)
+- `OLLAMA_MODEL` (por defecto `llama3.2`)
+
+Las facturas no se envían a servicios de pago. El matching de códigos Effi sigue siendo local (GTIN / RapidFuzz) y no inventa IDs.
+
+## 8. Ejecutar
 
 Desde la raíz del proyecto:
 
@@ -95,7 +116,7 @@ Desde la raíz del proyecto:
 streamlit run app_effi.py
 ```
 
-## 8. Verificación inicial
+## 9. Verificación inicial
 
 Realizar una prueba con:
 
@@ -114,7 +135,7 @@ Verificar que:
 - Las verificaciones aparecen en `Calculos_y_Verificaciones`.
 - Los productos de baja confianza no se inventan ni se asignan arbitrariamente.
 
-## 9. Errores frecuentes
+## 10. Errores frecuentes
 
 ### `streamlit` no se reconoce
 
@@ -135,6 +156,10 @@ tesseract --version
 Si falla, instalar Tesseract y configurar el PATH del sistema.
 
 Si la aplicación implementa una configuración específica para indicar la ruta, documentarla aquí cuando esté confirmada.
+
+### Ollama no aparece como listo
+
+Comprobar que el servicio local responde en `http://127.0.0.1:11434` y que el modelo existe (`ollama list`).
 
 ### No aparecen coincidencias
 
@@ -159,7 +184,7 @@ Preferir, cuando sea posible:
 
 Fotografías inclinadas, borrosas, arrugadas o manuscritas pueden producir errores de OCR.
 
-## 10. Entorno de desarrollo
+## 11. Entorno de desarrollo
 
 Instalar:
 

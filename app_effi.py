@@ -1,9 +1,10 @@
-
 import io
 import os
 import re
 import json
 import math
+import sys
+import hashlib
 import shutil
 import logging
 import unicodedata
@@ -41,6 +42,25 @@ except Exception:
 
 APP_TITLE = "Effi – Procesador de Facturas e Importación"
 PROJECT_ROOT = Path(__file__).resolve().parent
+_SRC = PROJECT_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from effi_processor.ollama_extract import (  # noqa: E402
+    check_ollama,
+    default_host,
+    default_model,
+    extract_invoice_items,
+    select_extracted_rows,
+    should_call_ollama,
+)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def cached_check_ollama(host: str):
+    return check_ollama(host)
+
+
 LOCAL_TESSDATA = PROJECT_ROOT / "tessdata"
 TESSERACT_CANDIDATES = [
     Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
@@ -126,16 +146,34 @@ EFFI_HEADERS = [
 ]
 
 UNIT_FACTORS_TO_LITERS = {
-    "ml": 0.001, "mililitro": 0.001, "mililitros": 0.001,
-    "l": 1.0, "lt": 1.0, "litro": 1.0, "litros": 1.0,
-    "cl": 0.01, "centilitro": 0.01, "centilitros": 0.01,
-    "gal": 3.785411784, "galon": 3.785411784, "galón": 3.785411784,
-    "galones": 3.785411784, "us gallon": 3.785411784,
+    "ml": 0.001,
+    "mililitro": 0.001,
+    "mililitros": 0.001,
+    "l": 1.0,
+    "lt": 1.0,
+    "litro": 1.0,
+    "litros": 1.0,
+    "cl": 0.01,
+    "centilitro": 0.01,
+    "centilitros": 0.01,
+    "gal": 3.785411784,
+    "galon": 3.785411784,
+    "galón": 3.785411784,
+    "galones": 3.785411784,
+    "us gallon": 3.785411784,
 }
 UNIT_FACTORS_TO_KG = {
-    "mg": 0.000001, "miligramo": 0.000001, "miligramo": 0.000001,
-    "g": 0.001, "gramo": 0.001, "gramos": 0.001,
-    "kg": 1.0, "kilo": 1.0, "kilos": 1.0, "kilogramo": 1.0, "kilogramos": 1.0,
+    "mg": 0.000001,
+    "miligramo": 0.000001,
+    "miligramo": 0.000001,
+    "g": 0.001,
+    "gramo": 0.001,
+    "gramos": 0.001,
+    "kg": 1.0,
+    "kilo": 1.0,
+    "kilos": 1.0,
+    "kilogramo": 1.0,
+    "kilogramos": 1.0,
 }
 UNIT_FACTORS_TO_UNITS = {"und": 1.0, "unidad": 1.0, "unidades": 1.0, "u": 1.0}
 
@@ -144,9 +182,22 @@ PCT_RE = r"(\d+(?:[\.,]\d+)?)\s*%"
 EFFI_MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB (límite Effi)
 EFFI_IMPORT_EXTENSIONS = {".xlsx", ".xlsm", ".xls", ".xlt"}
 INVOICE_UPLOAD_TYPES = [
-    "pdf", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff",
-    "csv", "xlsx", "xls", "xlsm", "xlt", "txt",
+    "pdf",
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
+    "bmp",
+    "tif",
+    "tiff",
+    "csv",
+    "xlsx",
+    "xls",
+    "xlsm",
+    "xlt",
+    "txt",
 ]
+
 
 def normalize_text(value):
     if value is None:
@@ -155,6 +206,7 @@ def normalize_text(value):
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"[^a-z0-9]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
+
 
 def parse_number(value):
     if value is None or (isinstance(value, float) and math.isnan(value)):
@@ -180,7 +232,11 @@ def parse_number(value):
     elif "," in s:
         # decimal comma unless many groups imply thousands
         parts = s.split(",")
-        s = "".join(parts[:-1]) + "." + parts[-1] if len(parts[-1]) <= 2 else "".join(parts)
+        s = (
+            "".join(parts[:-1]) + "." + parts[-1]
+            if len(parts[-1]) <= 2
+            else "".join(parts)
+        )
     elif "." in s:
         parts = s.split(".")
         s = "".join(parts) if len(parts[-1]) == 3 and len(parts) > 1 else s
@@ -195,7 +251,9 @@ def excel_safe_value(value):
     if value is None:
         return None
     if isinstance(value, (list, tuple, set)):
-        return " | ".join(excel_safe_value(v) if not isinstance(v, str) else v for v in value)
+        return " | ".join(
+            excel_safe_value(v) if not isinstance(v, str) else v for v in value
+        )
     if isinstance(value, dict):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, float) and math.isnan(value):
@@ -207,8 +265,10 @@ def excel_safe_value(value):
             pass
     return value
 
+
 def parse_money_series(series):
     return series.map(parse_number)
+
 
 def _ensure_ocr_ready():
     ok, msg = configure_tesseract()
@@ -272,6 +332,7 @@ def read_document(uploaded_file):
         return None, "spreadsheet"
     raise ValueError(f"Formato no soportado: {ext}")
 
+
 def read_catalog(uploaded_file):
     data = uploaded_file.getvalue()
     ext = Path(uploaded_file.name).suffix.lower()
@@ -283,6 +344,7 @@ def read_catalog(uploaded_file):
     if ext in {".xlsx", ".xls", ".xlsm", ".xlt"}:
         return pd.read_excel(io.BytesIO(data), dtype=str)
     raise ValueError("El catálogo maestro debe ser CSV o Excel (xlsx|xlsm|xls|xlt).")
+
 
 def find_column(df, candidates):
     norm_map = {normalize_text(c): c for c in df.columns}
@@ -297,23 +359,61 @@ def find_column(df, candidates):
                 return c
     return None
 
+
 def detect_catalog_columns(df):
     return {
-        "gtin": find_column(df, [
-            "GTIN", "Código de barras", "Codigo de barras", "EAN", "Código", "Codigo", "Barcode"
-        ]),
-        "effi": find_column(df, [
-            "ID EFFI", "Código EFFI", "Codigo EFFI", "ID", "ID Artículo", "Articulo ID"
-        ]),
-        "description": find_column(df, [
-            "Descripción", "Descripcion", "Artículo", "Articulo", "Nombre", "Producto"
-        ]),
-        "presentation": find_column(df, [
-            "Presentación", "Presentacion", "Empaque", "Unidad", "Contenido", "Tamaño", "Tamano"
-        ]),
+        "gtin": find_column(
+            df,
+            [
+                "GTIN",
+                "Código de barras",
+                "Codigo de barras",
+                "EAN",
+                "Código",
+                "Codigo",
+                "Barcode",
+            ],
+        ),
+        "effi": find_column(
+            df,
+            [
+                "ID EFFI",
+                "Código EFFI",
+                "Codigo EFFI",
+                "ID",
+                "ID Artículo",
+                "Articulo ID",
+            ],
+        ),
+        "description": find_column(
+            df,
+            [
+                "Descripción",
+                "Descripcion",
+                "Artículo",
+                "Articulo",
+                "Nombre",
+                "Producto",
+            ],
+        ),
+        "presentation": find_column(
+            df,
+            [
+                "Presentación",
+                "Presentacion",
+                "Empaque",
+                "Unidad",
+                "Contenido",
+                "Tamaño",
+                "Tamano",
+            ],
+        ),
         "brand": find_column(df, ["Marca", "Brand"]),
-        "tax": find_column(df, ["IVA", "Impuesto", "Código Impuesto", "Codigo Impuesto"]),
+        "tax": find_column(
+            df, ["IVA", "Impuesto", "Código Impuesto", "Codigo Impuesto"]
+        ),
     }
+
 
 def clean_gtin(value):
     if value is None:
@@ -324,11 +424,15 @@ def clean_gtin(value):
     s = re.sub(r"\D", "", s)
     return s
 
+
 def extract_presentation(text):
     s = normalize_text(text)
     # e.g. 3.785 L, 4L, 500 ml, 1.5 kg, 250 g, 12 und
     patterns = [
-        (r"(\d+(?:\.\d+)?)\s*(ml|mililitros?|cl|litros?|l|lt|galones?|galon|gal)\b", "volume"),
+        (
+            r"(\d+(?:\.\d+)?)\s*(ml|mililitros?|cl|litros?|l|lt|galones?|galon|gal)\b",
+            "volume",
+        ),
         (r"(\d+(?:\.\d+)?)\s*(mg|gramos?|g|kg|kilos?)\b", "mass"),
         (r"(\d+(?:\.\d+)?)\s*(und|unidades?|unidad|u)\b", "units"),
     ]
@@ -344,6 +448,7 @@ def extract_presentation(text):
         return 1.0, "galon", "volume"
     return None, None, None
 
+
 def presentation_base_quantity(text):
     n, unit, kind = extract_presentation(text)
     if n is None:
@@ -356,6 +461,7 @@ def presentation_base_quantity(text):
     else:
         factor = UNIT_FACTORS_TO_UNITS.get(u)
     return (n * factor if factor else n), kind
+
 
 def similarity(a, b):
     a, b = normalize_text(a), normalize_text(b)
@@ -433,7 +539,11 @@ def match_catalog_item(description, presentation, catalog, cols, catalog_index=N
     best = None
     best_score = 0
     for idx, row in catalog.iterrows():
-        text = " ".join(str(row.get(cols[k], "") or "") for k in ["description", "presentation", "brand"] if cols.get(k))
+        text = " ".join(
+            str(row.get(cols[k], "") or "")
+            for k in ["description", "presentation", "brand"]
+            if cols.get(k)
+        )
         score = similarity(query, text)
         if qgt and cols.get("gtin"):
             cgt = clean_gtin(row.get(cols["gtin"], ""))
@@ -444,25 +554,61 @@ def match_catalog_item(description, presentation, catalog, cols, catalog_index=N
             best = idx
     return (catalog.loc[best] if best is not None else None), best_score, "Fuzzy"
 
+
 def infer_columns_from_invoice_df(df):
     return {
-        "code": find_column(df, [
-            "Referencia", "REF", "Codigo", "Código", "GTIN", "EAN", "Barcode", "Código de barras", "SKU"
-        ]),
-        "description": find_column(df, [
-            "Descripcion", "Descripción", "Articulo", "Artículo", "Producto", "Nombre"
-        ]),
-        "presentation": find_column(df, ["Presentacion", "Presentación", "Empaque", "Unidad"]),
+        "code": find_column(
+            df,
+            [
+                "Referencia",
+                "REF",
+                "Codigo",
+                "Código",
+                "GTIN",
+                "EAN",
+                "Barcode",
+                "Código de barras",
+                "SKU",
+            ],
+        ),
+        "description": find_column(
+            df,
+            [
+                "Descripcion",
+                "Descripción",
+                "Articulo",
+                "Artículo",
+                "Producto",
+                "Nombre",
+            ],
+        ),
+        "presentation": find_column(
+            df, ["Presentacion", "Presentación", "Empaque", "Unidad"]
+        ),
         "info": find_column(df, ["Inf.", "Inf", "Información", "Info"]),
         "quantity": find_column(df, ["Cantidad", "Cant.", "Cant"]),
-        "list_price": find_column(df, ["Precio Lista", "Precio de lista", "Precio Lista Unitario", "P. Lista"]),
-        "unit_price": find_column(df, [
-            "Precio Unitario", "PRECIO UNITARIO", "Precio ud.", "Precio", "Valor Unitario"
-        ]),
-        "total": find_column(df, ["Valor", "VALOR", "Precio Total", "Total", "Valor Total", "Importe"]),
-        "discount": find_column(df, ["Descuento", "Desc.", "Dto.", "% Descuento", "% Desc"]),
+        "list_price": find_column(
+            df, ["Precio Lista", "Precio de lista", "Precio Lista Unitario", "P. Lista"]
+        ),
+        "unit_price": find_column(
+            df,
+            [
+                "Precio Unitario",
+                "PRECIO UNITARIO",
+                "Precio ud.",
+                "Precio",
+                "Valor Unitario",
+            ],
+        ),
+        "total": find_column(
+            df, ["Valor", "VALOR", "Precio Total", "Total", "Valor Total", "Importe"]
+        ),
+        "discount": find_column(
+            df, ["Descuento", "Desc.", "Dto.", "% Descuento", "% Desc"]
+        ),
         "tax": find_column(df, ["IVA", "Impuesto", "Tax"]),
     }
+
 
 def extract_invoice_rows_from_text(text):
     """
@@ -700,7 +846,12 @@ def parse_text_line(line):
         a, b, c = vals[0], vals[1], vals[2]
         if looks_qty(a) and looks_money(b) and looks_money(c):
             qty, unit, total = a, b, c
-            if qty and unit and total and abs(qty * unit - total) > max(1.0, 0.25 * abs(total)):
+            if (
+                qty
+                and unit
+                and total
+                and abs(qty * unit - total) > max(1.0, 0.25 * abs(total))
+            ):
                 if a > 100:
                     unit, total = a, b
                     qty = (total / unit) if unit else 1.0
@@ -743,20 +894,32 @@ def parse_invoice_text(text):
             parsed.append(row)
     return parsed
 
+
 def detect_global_tax(text):
     n = normalize_text(text)
     if "iva incluido" in n or "iva incluido" in n:
         return True
     return None
 
+
 def find_percentages(text):
     return [float(x.replace(",", ".")) for x in re.findall(PCT_RE, text)]
 
+
 def find_additional_charges(text):
     keywords = [
-        "retefuente", "rete iva", "reteiva", "rete ica", "reteica",
-        "impuesto al consumo", "flete", "transporte", "seguro", "otros cargos",
-        "descuento financiero", "descuento pronto pago"
+        "retefuente",
+        "rete iva",
+        "reteiva",
+        "rete ica",
+        "reteica",
+        "impuesto al consumo",
+        "flete",
+        "transporte",
+        "seguro",
+        "otros cargos",
+        "descuento financiero",
+        "descuento pronto pago",
     ]
     out = []
     lines = text.splitlines()
@@ -765,11 +928,16 @@ def find_additional_charges(text):
         if any(k in n for k in keywords):
             vals = re.findall(MONEY_RE, line)
             # Unir a texto: openpyxl no acepta listas en celdas.
-            out.append({
-                "concepto": line.strip(),
-                "valores_detectados": " | ".join(v.strip() for v in vals) if vals else "",
-            })
+            out.append(
+                {
+                    "concepto": line.strip(),
+                    "valores_detectados": (
+                        " | ".join(v.strip() for v in vals) if vals else ""
+                    ),
+                }
+            )
     return out
+
 
 def detect_bonus(text):
     """
@@ -778,9 +946,12 @@ def detect_bonus(text):
     bonuses = []
     for line in text.splitlines():
         n = normalize_text(line)
-        if "*" in line or any(k in n for k in ["bonificacion", "obsequio", "gratis", "regalo", "bono"]):
+        if "*" in line or any(
+            k in n for k in ["bonificacion", "obsequio", "gratis", "regalo", "bono"]
+        ):
             bonuses.append(line.strip())
     return bonuses
+
 
 def compute_invoice_item(row, catalog_row, cols, tax_rate=0.19):
     qty = parse_number(row.get("quantity"))
@@ -810,6 +981,7 @@ def compute_invoice_item(row, catalog_row, cols, tax_rate=0.19):
         "discount_value": discount_value or 0.0,
     }
 
+
 def make_workbook(main_rows, audit_tables):
     wb = openpyxl_workbook()
     ws = wb.active
@@ -819,7 +991,9 @@ def make_workbook(main_rows, audit_tables):
     for c, h in enumerate(EFFI_HEADERS, 1):
         cell = ws.cell(row=1, column=c, value=h)
         cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
     for r_idx, row in enumerate(main_rows, 2):
         for c_idx, value in enumerate(row, 1):
             value = excel_safe_value(value)
@@ -848,14 +1022,19 @@ def make_workbook(main_rows, audit_tables):
             for c, value in enumerate(values, 1):
                 sh.cell(r, c, excel_safe_value(value))
         for c in range(1, sh.max_column + 1):
-            sh.column_dimensions[get_column_letter(c)].width = min(45, max(14, len(str(sh.cell(1,c).value or "")) + 2))
+            sh.column_dimensions[get_column_letter(c)].width = min(
+                45, max(14, len(str(sh.cell(1, c).value or "")) + 2)
+            )
         sh.freeze_panes = "A2"
 
     return wb
 
+
 def openpyxl_workbook():
     from openpyxl import Workbook
+
     return Workbook()
+
 
 def save_workbook(wb):
     buf = io.BytesIO()
@@ -876,26 +1055,45 @@ def spreadsheet_rows_from_df(invoice_df_raw, source_name=""):
     for _, r in invoice_df_raw.iterrows():
         code_raw = r.get(inv_cols["code"], "") if inv_cols["code"] else ""
         is_bonus = "*" in str(code_raw) or "*" in " ".join(str(x) for x in r.tolist())
-        normalized_rows.append({
-            "archivo_origen": source_name,
-            "code": str(code_raw).replace("*", "").strip(),
-            "description": r.get(inv_cols["description"], "") if inv_cols["description"] else "",
-            "presentation": r.get(inv_cols["presentation"], "") if inv_cols["presentation"] else "",
-            "quantity": r.get(inv_cols["quantity"], "") if inv_cols["quantity"] else "",
-            "unit_price_invoice": (
-                r.get(inv_cols["unit_price"], "") if inv_cols["unit_price"]
-                else r.get(inv_cols["list_price"], "")
-            ),
-            "total_invoice": r.get(inv_cols["total"], "") if inv_cols["total"] else "",
-            "discount_pct": r.get(inv_cols["discount"], "") if inv_cols["discount"] else "",
-            "discount_value": "",
-            "is_bonus": is_bonus,
-            "source_line": " | ".join(str(x) for x in r.tolist() if str(x) != "nan"),
-        })
+        normalized_rows.append(
+            {
+                "archivo_origen": source_name,
+                "code": str(code_raw).replace("*", "").strip(),
+                "description": (
+                    r.get(inv_cols["description"], "")
+                    if inv_cols["description"]
+                    else ""
+                ),
+                "presentation": (
+                    r.get(inv_cols["presentation"], "")
+                    if inv_cols["presentation"]
+                    else ""
+                ),
+                "quantity": (
+                    r.get(inv_cols["quantity"], "") if inv_cols["quantity"] else ""
+                ),
+                "unit_price_invoice": (
+                    r.get(inv_cols["unit_price"], "")
+                    if inv_cols["unit_price"]
+                    else r.get(inv_cols["list_price"], "")
+                ),
+                "total_invoice": (
+                    r.get(inv_cols["total"], "") if inv_cols["total"] else ""
+                ),
+                "discount_pct": (
+                    r.get(inv_cols["discount"], "") if inv_cols["discount"] else ""
+                ),
+                "discount_value": "",
+                "is_bonus": is_bonus,
+                "source_line": " | ".join(
+                    str(x) for x in r.tolist() if str(x) != "nan"
+                ),
+            }
+        )
     return normalized_rows, inv_cols
 
 
-def load_invoice_uploaded_file(uploaded_file):
+def load_invoice_uploaded_file(uploaded_file, ollama_settings=None):
     """Lee una factura (PDF/imagen/Excel/CSV/TXT) y devuelve filas normalizadas + metadatos."""
     name = uploaded_file.name
     size = len(uploaded_file.getvalue())
@@ -919,6 +1117,8 @@ def load_invoice_uploaded_file(uploaded_file):
             "rows": rows,
             "candidates": [],
             "columns": inv_cols,
+            "ollama_message": None,
+            "ollama_tax_included": None,
             "error": None,
         }
 
@@ -926,6 +1126,48 @@ def load_invoice_uploaded_file(uploaded_file):
     parsed = parse_invoice_text(invoice_text or "")
     for row in parsed:
         row["archivo_origen"] = name
+        row.setdefault("extraction_source", "regex")
+
+    ollama_message = None
+    ollama_tax_included = None
+    settings = ollama_settings or {}
+    mode = str(settings.get("mode") or "fallback")
+    if should_call_ollama(
+        bool(settings.get("enabled")),
+        mode,
+        parsed,
+        invoice_text or "",
+    ):
+        digest = hashlib.sha256(uploaded_file.getvalue()).hexdigest()[:20]
+        cache_key = "|".join(
+            [
+                name,
+                digest,
+                str(settings.get("host") or ""),
+                str(settings.get("model") or ""),
+                mode,
+            ]
+        )
+        cache = st.session_state.setdefault("ollama_extract_cache", {})
+        if cache_key in cache:
+            ollama_result = cache[cache_key]
+        else:
+            ollama_result = extract_invoice_items(
+                invoice_text or "",
+                host=settings.get("host"),
+                model=settings.get("model"),
+                timeout=float(settings.get("timeout") or 120),
+                source_name=name,
+            )
+            cache[cache_key] = ollama_result
+        ollama_message = ollama_result.get("message")
+        ollama_tax_included = ollama_result.get("tax_included")
+        parsed = select_extracted_rows(
+            parsed,
+            ollama_result.get("rows") or [],
+            mode=mode,
+        )
+
     return {
         "name": name,
         "kind": invoice_kind,
@@ -933,6 +1175,8 @@ def load_invoice_uploaded_file(uploaded_file):
         "rows": parsed,
         "candidates": candidates,
         "columns": None,
+        "ollama_message": ollama_message,
+        "ollama_tax_included": ollama_tax_included,
         "error": None,
     }
 
@@ -981,7 +1225,10 @@ def render_download_panel(auto_open_folder: bool = False, key_prefix: str = "mai
             except Exception:
                 pass
 
-def build_audit(main_rows, audit_records, omitted, conversions, bonuses, discounts, charges, summary):
+
+def build_audit(
+    main_rows, audit_records, omitted, conversions, bonuses, discounts, charges, summary
+):
     audit = {
         "Resumen": pd.DataFrame([summary]),
         "Auditoria_Items": pd.DataFrame(audit_records),
@@ -997,6 +1244,7 @@ def build_audit(main_rows, audit_records, omitted, conversions, bonuses, discoun
             audit[k] = pd.DataFrame([{"Estado": "Sin registros detectados"}])
     return audit
 
+
 def configure_logging(log_path):
     logger = logging.getLogger("effi_processor")
     logger.setLevel(logging.INFO)
@@ -1006,6 +1254,7 @@ def configure_logging(log_path):
     fh.setFormatter(fmt)
     logger.addHandler(fh)
     return logger
+
 
 def process(catalog_df, catalog_cols, invoice_df, settings, logger):
     tax_rate = settings["tax_rate"]
@@ -1058,35 +1307,56 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
 
         # Detect pure gift lines.
         line_text = normalize_text(row.get("source_line", ""))
-        is_bonus = bool(row.get("is_bonus")) or "*" in str(row.get("source_line", "")) or any(
-            x in line_text for x in ["bonificacion", "obsequio", "gratis", "regalo"]
+        is_bonus = (
+            bool(row.get("is_bonus"))
+            or "*" in str(row.get("source_line", ""))
+            or any(
+                x in line_text for x in ["bonificacion", "obsequio", "gratis", "regalo"]
+            )
         )
 
         if catalog_row is None or score < match_threshold:
             total_omitted += total or 0
-            omitted.append({
-                "Línea documento": i + 1,
-                "Código documento": code,
-                "Descripción": desc,
-                "Presentación": pres,
-                "Cantidad": qty,
-                "Precio unitario documento": unit_inv,
-                "Total documento": total,
-                "Motivo": f"No encontrado / confianza {score:.1%}",
-                "Acción requerida": "CREAR PREVIAMENTE EN EFFI y luego reprocesar/importar",
-            })
-            audit_records.append({
-                "Línea": i + 1, "Estado": "OMITIDO", "Descripción": desc,
-                "GTIN": code, "Confianza": score, "Método": method,
-                "Cantidad": qty, "Total factura": total,
-            })
-            logger.warning("Item omitido línea %s: %s | score=%.3f", i+1, desc, score)
+            omitted.append(
+                {
+                    "Línea documento": i + 1,
+                    "Código documento": code,
+                    "Descripción": desc,
+                    "Presentación": pres,
+                    "Cantidad": qty,
+                    "Precio unitario documento": unit_inv,
+                    "Total documento": total,
+                    "Motivo": f"No encontrado / confianza {score:.1%}",
+                    "Acción requerida": "CREAR PREVIAMENTE EN EFFI y luego reprocesar/importar",
+                }
+            )
+            audit_records.append(
+                {
+                    "Línea": i + 1,
+                    "Estado": "OMITIDO",
+                    "Descripción": desc,
+                    "GTIN": code,
+                    "Confianza": score,
+                    "Método": method,
+                    "Cantidad": qty,
+                    "Total factura": total,
+                }
+            )
+            logger.warning("Item omitido línea %s: %s | score=%.3f", i + 1, desc, score)
             continue
 
         cdesc = str(catalog_row.get(catalog_cols["description"], desc))
         cpres = str(catalog_row.get(catalog_cols["presentation"], "") or "")
-        gtin = clean_gtin(catalog_row.get(catalog_cols["gtin"], "")) if catalog_cols["gtin"] else code
-        effi_id = str(catalog_row.get(catalog_cols["effi"], "") or "") if catalog_cols["effi"] else ""
+        gtin = (
+            clean_gtin(catalog_row.get(catalog_cols["gtin"], ""))
+            if catalog_cols["gtin"]
+            else code
+        )
+        effi_id = (
+            str(catalog_row.get(catalog_cols["effi"], "") or "")
+            if catalog_cols["effi"]
+            else ""
+        )
 
         # Presentation conversion. Convert the document presentation to the catalog base presentation.
         doc_base, doc_kind = presentation_base_quantity(f"{pres} {desc}")
@@ -1100,17 +1370,21 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
             qty_adjusted = qty * unit_conversion_factor
             if abs(unit_conversion_factor - 1.0) > 1e-9:
                 # Preserve total paid: unit cost becomes proportional to the adjusted physical quantity.
-                conversions.append({
-                    "Línea": i + 1,
-                    "Documento": f"{pres} {desc}".strip(),
-                    "Maestro": f"{cpres} {cdesc}".strip(),
-                    "Tipo": doc_kind,
-                    "Factor": unit_conversion_factor,
-                    "Cantidad documento": qty,
-                    "Cantidad equivalente maestro": qty_adjusted,
-                    "Regla": "Equivalencia matemática; total pagado conservado",
-                })
-                logger.info("Conversión línea %s: factor %.9f", i+1, unit_conversion_factor)
+                conversions.append(
+                    {
+                        "Línea": i + 1,
+                        "Documento": f"{pres} {desc}".strip(),
+                        "Maestro": f"{cpres} {cdesc}".strip(),
+                        "Tipo": doc_kind,
+                        "Factor": unit_conversion_factor,
+                        "Cantidad documento": qty,
+                        "Cantidad equivalente maestro": qty_adjusted,
+                        "Regla": "Equivalencia matemática; total pagado conservado",
+                    }
+                )
+                logger.info(
+                    "Conversión línea %s: factor %.9f", i + 1, unit_conversion_factor
+                )
 
         # Determine tax base.
         if tax_mode == "Incluye IVA":
@@ -1118,7 +1392,9 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
         elif tax_mode == "Neto":
             base_total = total
         else:  # Auto
-            base_total = total / (1 + tax_rate) if settings["auto_tax_included"] else total
+            base_total = (
+                total / (1 + tax_rate) if settings["auto_tax_included"] else total
+            )
 
         # Discount handling: preserve item-specific discount and never apply a global discount.
         disc_pct = parse_number(row.get("discount_pct")) or 0.0
@@ -1133,11 +1409,16 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
         if is_bonus:
             disc_value = abs(base_total)
             disc_pct = 100.0
-            bonuses.append({
-                "Línea": i + 1, "Descripción": desc, "Cantidad obsequiada": qty,
-                "Costo asignado": base_total, "Descuento": disc_value,
-                "Tratamiento": "100% descuento por bonificación pura",
-            })
+            bonuses.append(
+                {
+                    "Línea": i + 1,
+                    "Descripción": desc,
+                    "Cantidad obsequiada": qty,
+                    "Costo asignado": base_total,
+                    "Descuento": disc_value,
+                    "Tratamiento": "100% descuento por bonificación pura",
+                }
+            )
             # Pure bonus with no direct cost: retain as a line only if catalog exists.
             # The preferred grouped X+Y treatment is handled below when explicit quantities are known.
 
@@ -1157,36 +1438,51 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
             if candidate_tax:
                 tax_code = candidate_tax
 
-        main_rows.append([
-            gtin or effi_id,
-            "",
-            "",
-            "",
-            cdesc,
-            round(qty_adjusted, 6),
-            round(unit_base, 6),
-            round(disc_value, 6),
-            tax_code,
-        ])
+        main_rows.append(
+            [
+                gtin or effi_id,
+                "",
+                "",
+                "",
+                cdesc,
+                round(qty_adjusted, 6),
+                round(unit_base, 6),
+                round(disc_value, 6),
+                tax_code,
+            ]
+        )
 
         total_invoice += total
         total_exported += total
-        discounts.append({
-            "Línea": i + 1,
-            "Descripción": cdesc,
-            "Porcentaje descuento": disc_pct,
-            "Valor descuento": disc_value,
-            "Fuente": "Documento / cálculo por línea",
-        })
-        audit_records.append({
-            "Línea": i + 1, "Estado": "EXPORTADO", "Descripción": cdesc,
-            "GTIN": gtin, "ID EFFI": effi_id, "Confianza": score,
-            "Método": method, "Cantidad original": qty,
-            "Cantidad ajustada": qty_adjusted, "Precio documento": unit_inv,
-            "Total documento": total, "Base neta": base_total,
-            "Descuento": disc_value, "Precio base unitario": unit_base,
-            "IVA": tax_rate, "Código impuesto": tax_code,
-        })
+        discounts.append(
+            {
+                "Línea": i + 1,
+                "Descripción": cdesc,
+                "Porcentaje descuento": disc_pct,
+                "Valor descuento": disc_value,
+                "Fuente": "Documento / cálculo por línea",
+            }
+        )
+        audit_records.append(
+            {
+                "Línea": i + 1,
+                "Estado": "EXPORTADO",
+                "Descripción": cdesc,
+                "GTIN": gtin,
+                "ID EFFI": effi_id,
+                "Confianza": score,
+                "Método": method,
+                "Cantidad original": qty,
+                "Cantidad ajustada": qty_adjusted,
+                "Precio documento": unit_inv,
+                "Total documento": total,
+                "Base neta": base_total,
+                "Descuento": disc_value,
+                "Precio base unitario": unit_base,
+                "IVA": tax_rate,
+                "Código impuesto": tax_code,
+            }
+        )
 
     charges.extend(settings.get("additional_charges", []))
 
@@ -1203,10 +1499,28 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
         "Umbral de coincidencia": match_threshold,
         "Filas exportadas": len(main_rows),
         "Filas omitidas": len(omitted),
-        "Resultado": "REVISAR: existen omisiones o diferencias" if abs(deviation) > 0.01 else "CUADRATURA ACEPTADA",
+        "Resultado": (
+            "REVISAR: existen omisiones o diferencias"
+            if abs(deviation) > 0.01
+            else "CUADRATURA ACEPTADA"
+        ),
     }
 
-    return main_rows, build_audit(main_rows, audit_records, omitted, conversions, bonuses, discounts, charges, summary), summary
+    return (
+        main_rows,
+        build_audit(
+            main_rows,
+            audit_records,
+            omitted,
+            conversions,
+            bonuses,
+            discounts,
+            charges,
+            summary,
+        ),
+        summary,
+    )
+
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -1227,8 +1541,12 @@ ocr_ok, ocr_msg = configure_tesseract()
 with st.sidebar:
     st.header("Configuración")
     tax_mode = st.selectbox("Tratamiento del IVA", ["Auto", "Incluye IVA", "Neto"])
-    tax_rate = st.number_input("IVA", min_value=0.0, max_value=1.0, value=0.19, step=0.01, format="%.2f")
-    auto_tax_included = st.checkbox("En modo Auto, asumir IVA incluido si el documento lo indica", True)
+    tax_rate = st.number_input(
+        "IVA", min_value=0.0, max_value=1.0, value=0.19, step=0.01, format="%.2f"
+    )
+    auto_tax_included = st.checkbox(
+        "En modo Auto, asumir IVA incluido si el documento lo indica", True
+    )
     match_threshold = st.slider("Umbral mínimo de coincidencia", 0.50, 0.99, 0.82, 0.01)
     st.info("Los productos bajo el umbral NO se agregan a la hoja principal.")
     st.caption("Importación Effi: formatos xlsx · xlsm · xls · xlt · máx. 5 MB")
@@ -1237,6 +1555,67 @@ with st.sidebar:
     else:
         st.warning(f"OCR no disponible: {ocr_msg}")
         st.caption("Puede seguir usando Excel/CSV/TXT o PDF con texto seleccionable.")
+
+    st.divider()
+    st.subheader("Ollama (local, gratuito)")
+    st.caption(
+        "Usa un modelo en su PC. No envía facturas a APIs de pago. "
+        "Instale https://ollama.com y ejecute `ollama pull llama3.2`."
+    )
+    ollama_host = st.text_input(
+        "Servidor Ollama",
+        value=default_host(),
+        help="Por defecto http://127.0.0.1:11434",
+        key="ollama_host",
+    )
+
+    ollama_status = cached_check_ollama(ollama_host)
+    if ollama_status["ok"]:
+        st.success(ollama_status["message"])
+    else:
+        st.warning(ollama_status["message"])
+
+    available_models = ollama_status.get("models") or []
+    preferred = default_model()
+    if available_models:
+        model_index = 0
+        for i, name in enumerate(available_models):
+            if name == preferred or name.startswith(preferred + ":"):
+                model_index = i
+                break
+        ollama_model = st.selectbox(
+            "Modelo",
+            available_models,
+            index=model_index,
+            key="ollama_model",
+        )
+    else:
+        ollama_model = st.text_input("Modelo", value=preferred, key="ollama_model_text")
+
+    use_ollama = st.checkbox(
+        "Usar Ollama para extraer líneas de PDF/imagen/TXT",
+        value=bool(ollama_status["ok"]),
+        disabled=not ollama_status["ok"],
+        key="use_ollama",
+    )
+    ollama_mode_label = st.radio(
+        "Cuándo usarlo",
+        [
+            "Respaldo (solo si el parser no obtiene líneas)",
+            "Siempre (priorizar Ollama)",
+        ],
+        index=0,
+        disabled=not use_ollama,
+        key="ollama_mode",
+    )
+    ollama_mode = "always" if ollama_mode_label.startswith("Siempre") else "fallback"
+    ollama_settings = {
+        "enabled": bool(use_ollama and ollama_status["ok"]),
+        "host": ollama_host,
+        "model": ollama_model,
+        "mode": ollama_mode,
+        "timeout": 120,
+    }
 
 catalog_file = st.file_uploader(
     "1) Catálogo maestro Effi (CSV/XLSX)",
@@ -1255,9 +1634,13 @@ if catalog_file:
         ccols = detect_catalog_columns(catalog)
         st.success(f"Catálogo cargado: {len(catalog):,} filas.")
         st.json(ccols)
-        missing = [k for k, v in ccols.items() if v is None and k in ("gtin", "description")]
+        missing = [
+            k for k, v in ccols.items() if v is None and k in ("gtin", "description")
+        ]
         if missing:
-            st.error(f"Columnas esenciales no detectadas: {missing}. Revise el catálogo.")
+            st.error(
+                f"Columnas esenciales no detectadas: {missing}. Revise el catálogo."
+            )
     except Exception as e:
         st.error(f"Error leyendo catálogo: {e}")
         catalog = None
@@ -1277,7 +1660,7 @@ if invoice_files:
     errors = []
     for uploaded in invoice_files:
         try:
-            meta = load_invoice_uploaded_file(uploaded)
+            meta = load_invoice_uploaded_file(uploaded, ollama_settings=ollama_settings)
             loaded_files.append(meta)
             invoice_kinds.append(meta["kind"])
             if meta["text"]:
@@ -1290,6 +1673,8 @@ if invoice_files:
             st.success(
                 f"{meta['name']}: {len(meta['rows'])} línea(s) · modo {meta['kind']}"
             )
+            if meta.get("ollama_message"):
+                st.caption(f"Ollama — {meta['name']}: {meta['ollama_message']}")
             if meta["kind"] != "spreadsheet" and meta["text"]:
                 with st.expander(f"Texto detectado — {meta['name']}"):
                     st.text(meta["text"][:15000])
@@ -1319,8 +1704,12 @@ if invoice_files:
             "(formato Effi: xlsx|xlsm|xls|xlt · máx. 5 MB)."
         )
         if all_candidates:
-            st.caption(f"Líneas candidatas detectadas (sin parseo completo): {len(all_candidates)}")
-            st.dataframe(pd.DataFrame(all_candidates), use_container_width=True, height=240)
+            st.caption(
+                f"Líneas candidatas detectadas (sin parseo completo): {len(all_candidates)}"
+            )
+            st.dataframe(
+                pd.DataFrame(all_candidates), use_container_width=True, height=240
+            )
     else:
         st.info(
             f"Consolidado: **{len(invoice_df)}** líneas de **{len(loaded_files)}** archivo(s)."
@@ -1329,17 +1718,28 @@ if invoice_files:
 if catalog is not None and invoice_df is not None and not invoice_df.empty:
     st.subheader("Previsualización consolidada (todas las facturas)")
     display_cols = [
-        c for c in [
-            "archivo_origen", "code", "description", "presentation",
-            "quantity", "unit_price_invoice", "total_invoice",
-            "discount_pct", "is_bonus", "source_line",
-        ] if c in invoice_df.columns
+        c
+        for c in [
+            "archivo_origen",
+            "extraction_source",
+            "code",
+            "description",
+            "presentation",
+            "quantity",
+            "unit_price_invoice",
+            "total_invoice",
+            "discount_pct",
+            "is_bonus",
+            "source_line",
+        ]
+        if c in invoice_df.columns
     ]
     st.dataframe(invoice_df[display_cols], use_container_width=True, height=360)
 
     by_file = (
         invoice_df.groupby("archivo_origen").size().reset_index(name="líneas")
-        if "archivo_origen" in invoice_df.columns else None
+        if "archivo_origen" in invoice_df.columns
+        else None
     )
     if by_file is not None and len(by_file) > 1:
         st.caption("Desglose por archivo")
@@ -1357,16 +1757,32 @@ if catalog is not None and invoice_df is not None and not invoice_df.empty:
             log_path = Path(f"effi_log_{timestamp}.log")
             logger = configure_logging(log_path)
 
+            ollama_taxes = [
+                meta.get("ollama_tax_included")
+                for meta in loaded_files
+                if meta.get("ollama_tax_included") is not None
+            ]
+            effective_auto_tax = auto_tax_included
+            if tax_mode == "Auto" and ollama_taxes:
+                if all(ollama_taxes):
+                    effective_auto_tax = True
+                elif not any(ollama_taxes):
+                    effective_auto_tax = False
+
             settings = {
                 "tax_rate": tax_rate,
                 "tax_mode": tax_mode,
-                "auto_tax_included": auto_tax_included,
+                "auto_tax_included": effective_auto_tax,
                 "match_threshold": match_threshold,
                 "additional_charges": find_additional_charges(invoice_text or ""),
             }
 
             try:
-                names = ", ".join(f["name"] for f in loaded_files) if loaded_files else "(sin nombre)"
+                names = (
+                    ", ".join(f["name"] for f in loaded_files)
+                    if loaded_files
+                    else "(sin nombre)"
+                )
                 logger.info("Inicio del procesamiento.")
                 logger.info("Catálogo: %s | Facturas: %s", catalog_file.name, names)
                 main_rows, audit_tables, summary = process(

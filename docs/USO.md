@@ -49,6 +49,7 @@ La barra lateral puede incluir parámetros como:
 
 - Porcentaje de IVA.
 - Umbral mínimo de coincidencia.
+- Ollama local (opcional): servidor, modelo y si se usa como respaldo o siempre.
 - Otras opciones disponibles en la versión instalada.
 
 No asumir parámetros que no estén implementados en `app_effi.py`.
