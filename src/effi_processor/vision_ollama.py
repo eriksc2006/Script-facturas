@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
     requests = None
 
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_VISION_MODEL = "moondream"
+DEFAULT_OLLAMA_VISION_MODEL = "qwen2.5vl:7b"
 VISION_TIMEOUT_SEC = 180
 
 
@@ -50,7 +50,8 @@ Analiza la imagen y devuelve SOLO un JSON válido (sin markdown, sin explicacion
     {
       "code": "referencia o código si aparece",
       "description": "nombre del producto",
-      "quantity": 0,
+            "quantity": 0,
+            "bonus_quantity": 0,
       "unit_price": 0,
       "total": 0,
       "discount_pct": null,
@@ -65,6 +66,10 @@ Reglas estrictas:
 - Si una línea es 'FACTURA', 'TOTAL', 'SUBTOTAL', 'IVA', 'RETENCIÓN', 'CLIENTE', 'NIT', 'FECHA', 'DIRECCIÓN', 'PAGOS', 'RESUMEN', 'ENTREGADO', 'BODEGA' o similar, NO la incluyas.
 - Un producto real suele tener nombre, cantidad y valor unitario o total. Si una línea no parece un producto, omítela aunque tenga números.
 - quantity, unit_price y total son números (usa punto decimal).
+- Respeta los encabezados de la tabla: usa la columna "Cantidad" como quantity. Ignora columnas como inventario, existencia, disponible, descuento o código interno si no corresponden a cantidad.
+- Comprueba cada línea con total = quantity pagada * unit_price. Si otra columna numérica parece una existencia, no la uses como quantity.
+- quantity es la cantidad pagada; bonus_quantity es la cantidad bonificada/gratis de esa misma línea.
+- Si hay 10 unidades pagadas y 3 bonificadas, devuelve quantity=10, bonus_quantity=3 y total=el valor pagado por las 10.
 - is_bonus=true si la línea es obsequio/bonificación/gratis o lleva *.
 - Si un campo no se ve, usa null o "" según corresponda.
 - No inventes productos que no aparezcan en la imagen.
@@ -80,7 +85,9 @@ def ollama_vision_model() -> str:
     return (os.environ.get("OLLAMA_VISION_MODEL") or DEFAULT_OLLAMA_VISION_MODEL).strip()
 
 
-def ollama_available(timeout: float = 2.0) -> tuple[bool, str]:
+def ollama_available(
+    timeout: float = 2.0, model: str | None = None
+) -> tuple[bool, str]:
     """Comprueba si el daemon Ollama responde en localhost."""
     if requests is None:
         return False, "Falta el paquete requests (pip install requests)."
@@ -89,17 +96,17 @@ def ollama_available(timeout: float = 2.0) -> tuple[bool, str]:
         if r.status_code != 200:
             return False, f"Ollama respondió HTTP {r.status_code}."
         models = [m.get("name", "") for m in (r.json().get("models") or [])]
-        model = ollama_vision_model()
+        model_name = (model or ollama_vision_model()).strip()
         installed = any(
-            name == model or name.startswith(f"{model}:") for name in models
+            name == model_name or name.startswith(f"{model_name}:") for name in models
         )
         if not installed:
             return (
                 False,
-                f"Ollama está activo pero falta el modelo '{model}'. "
-                f"Ejecute: ollama pull {model}",
+                f"Ollama está activo pero falta el modelo '{model_name}'. "
+                f"Ejecute: ollama pull {model_name}",
             )
-        return True, f"Ollama listo ({model})"
+        return True, f"Ollama listo ({model_name})"
     except Exception as exc:
         return (
             False,
@@ -147,6 +154,39 @@ def _as_bool(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"1", "true", "si", "sí", "yes", "y", "*"}
+
+
+def _as_number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace("$", "").replace(" ", "")
+    if not text:
+        return None
+    if "," in text and "." in text:
+        text = text.replace(".", "").replace(",", ".")
+    elif "," in text:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _reconcile_quantity(quantity: Any, unit: Any, total: Any) -> Any:
+    """Correct a quantity when another table column was read as quantity."""
+    qty = _as_number(quantity)
+    unit_value = _as_number(unit)
+    total_value = _as_number(total)
+    if not qty or not unit_value or not total_value or unit_value <= 0:
+        return quantity
+    inferred = total_value / unit_value
+    if inferred <= 0 or abs(inferred - round(inferred)) > 1e-6:
+        return quantity
+    if abs(qty - inferred) > 1e-6:
+        return int(round(inferred))
+    return quantity
 
 
 def _is_header_or_non_product_description(desc: str) -> bool:
@@ -207,8 +247,13 @@ def normalize_vision_items(payload: dict[str, Any], source_name: str = "") -> li
             continue
         code = str(item.get("code") or item.get("codigo") or item.get("referencia") or "").strip()
         qty = item.get("quantity", item.get("cantidad"))
+        bonus_qty = item.get(
+            "bonus_quantity",
+            item.get("cantidad_bonificada", item.get("cantidad_bonus", 0)),
+        )
         unit = item.get("unit_price", item.get("precio_unitario", item.get("precio")))
         total = item.get("total", item.get("valor", item.get("importe")))
+        qty = _reconcile_quantity(qty, unit, total)
         disc = item.get("discount_pct", item.get("descuento_pct", item.get("descuento")))
         is_bonus = _as_bool(item.get("is_bonus", item.get("bonificacion", item.get("obsequio"))))
         rows.append(
@@ -218,6 +263,7 @@ def normalize_vision_items(payload: dict[str, Any], source_name: str = "") -> li
                 "description": desc,
                 "presentation": str(item.get("presentation") or item.get("presentacion") or ""),
                 "quantity": qty,
+                "bonus_quantity": bonus_qty,
                 "unit_price_invoice": unit,
                 "total_invoice": total,
                 "discount_pct": disc,

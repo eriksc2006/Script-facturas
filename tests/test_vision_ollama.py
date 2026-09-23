@@ -35,6 +35,7 @@ def test_normalize_vision_items_maps_schema():
                 "code": "TA91",
                 "description": "ACTIVADOR THYMS",
                 "quantity": 10,
+                "bonus_quantity": 3,
                 "unit_price": 2500,
                 "total": 25000,
                 "is_bonus": False,
@@ -47,6 +48,7 @@ def test_normalize_vision_items_maps_schema():
     assert rows[0]["code"] == "TA91"
     assert rows[0]["archivo_origen"] == "factura.png"
     assert rows[0]["unit_price_invoice"] == 2500
+    assert rows[0]["bonus_quantity"] == 3
     assert rows[0]["source_line"].startswith("[vision]")
 
 
@@ -66,6 +68,42 @@ def test_normalize_accepts_spanish_keys():
     rows = normalize_vision_items(payload)
     assert rows[0]["is_bonus"] is True
     assert rows[0]["quantity"] == 3
+
+
+def test_normalize_corrects_quantity_using_invoice_total():
+    # Caso de la factura fotografiada: una columna numérica adicional puede
+    # leerse como 10, pero 56.800 / 28.400 demuestra que la cantidad es 2.
+    payload = {
+        "items": [
+            {
+                "code": "SILMANTSH",
+                "description": "SILKY MANTENIMIENTO SHAMPOO COLOR CARE",
+                "presentation": "250ml",
+                "quantity": 10,
+                "unit_price": 28400,
+                "total": 56800,
+            }
+        ]
+    }
+    rows = normalize_vision_items(payload)
+    assert rows[0]["quantity"] == 2
+
+
+def test_normalize_keeps_paid_quantity_for_bonus_rule():
+    payload = {
+        "items": [
+            {
+                "description": "PRODUCTO BONIFICADO",
+                "quantity": 10,
+                "bonus_quantity": 3,
+                "unit_price": 100,
+                "total": 1000,
+            }
+        ]
+    }
+    rows = normalize_vision_items(payload)
+    assert rows[0]["quantity"] == 10
+    assert rows[0]["bonus_quantity"] == 3
 
 
 def test_normalize_filters_headers_and_totals_not_products():

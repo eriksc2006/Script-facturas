@@ -369,20 +369,22 @@ def image_file_to_pil(file_bytes):
     return Image.open(io.BytesIO(file_bytes))
 
 
-def check_ollama_vision():
+def check_ollama_vision(model=None):
     if ollama_available is None:
         return False, "Módulo Vision no disponible."
-    return ollama_available()
+    return ollama_available(model=model)
 
 
-def try_vision_extract(images, source_name: str):
+def try_vision_extract(images, source_name: str, model=None):
     """Intenta extracción Vision; lanza si falla."""
     if extract_invoice_rows_from_images is None:
         raise RuntimeError("Módulo Vision Ollama no importado.")
-    ok, msg = check_ollama_vision()
+    ok, msg = check_ollama_vision(model=model)
     if not ok:
         raise RuntimeError(msg)
-    return extract_invoice_rows_from_images(images, source_name=source_name)
+    return extract_invoice_rows_from_images(
+        images, source_name=source_name, model=model
+    )
 
 
 def read_document(uploaded_file):
@@ -458,7 +460,11 @@ def detect_catalog_columns(df):
         "gtin": find_column(df, [
             "COD. BARRAS GTIN", "Código de barras GTIN", "Codigo de barras GTIN",
             "GTIN", "Código de barras", "Codigo de barras", "EAN", "Barcode",
-            "COD. BARRAS", "Código", "Codigo",
+            "COD. BARRAS",
+        ]),
+        "reference": find_column(df, [
+            "Código", "Codigo", "Código producto", "Codigo producto",
+            "Referencia", "Ref", "SKU", "Código interno", "Codigo interno",
         ]),
         "effi": find_column(df, [
             "ID EFFI", "Código EFFI", "Codigo EFFI", "ID Artículo", "Articulo ID", "ID",
@@ -587,6 +593,18 @@ def clean_gtin(value):
     return s
 
 
+def clean_product_code(value):
+    """Preserve Effi identifiers, including alphanumeric references like SILMANTSH."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return ""
+    if re.fullmatch(r"\d+(?:\.0+)?", text):
+        return clean_gtin(text)
+    return re.sub(r"[^A-Za-z0-9._/-]", "", text).upper()
+
+
 def extract_presentation(text):
     s = normalize_text(text)
     # e.g. 3.785 L, 4L, 500 ml, 1.5 kg, 250 g, 12 und
@@ -637,13 +655,20 @@ def similarity(a, b):
 
 
 def build_catalog_index(catalog, cols):
-    """Índice GTIN + textos precomputados para cruce O(1)/fuzzy rápido."""
+    """Índice GTIN/código alfanumérico + textos precomputados."""
     gtin_map = {}
     if cols.get("gtin"):
         for idx, raw in catalog[cols["gtin"]].items():
             gtin = clean_gtin(raw)
             if gtin and gtin not in gtin_map:
                 gtin_map[gtin] = idx
+
+    reference_map = {}
+    if cols.get("reference"):
+        for idx, raw in catalog[cols["reference"]].items():
+            reference = clean_product_code(raw)
+            if reference and reference not in reference_map:
+                reference_map[reference] = idx
 
     texts = []
     indices = []
@@ -658,7 +683,12 @@ def build_catalog_index(catalog, cols):
             texts.append(text)
             indices.append(idx)
 
-    return {"gtin_map": gtin_map, "texts": texts, "indices": indices}
+    return {
+        "gtin_map": gtin_map,
+        "reference_map": reference_map,
+        "texts": texts,
+        "indices": indices,
+    }
 
 
 def _token_overlap_score(a: str, b: str) -> float:
@@ -1327,19 +1357,8 @@ def load_invoice_uploaded_file(
             "error": None,
         }
     if ext in {".txt", ".csv"}:
+        # Continúa hacia la selección de Ollama para priorizarlo también en TXT/CSV.
         invoice_text = data.decode("utf-8", errors="replace")
-        parsed = parse_invoice_text(invoice_text)
-        for row in parsed:
-            row["archivo_origen"] = name
-        return {
-            "name": name,
-            "kind": "text",
-            "text": invoice_text,
-            "rows": parsed,
-            "candidates": extract_invoice_rows_from_text(invoice_text),
-            "columns": None,
-            "error": None,
-        }
 
     # PDF / imagen: Vision opcional + fallback Tesseract
     images = None
@@ -1351,24 +1370,17 @@ def load_invoice_uploaded_file(
                     images = pdf_page_images(data)
                 else:
                     text_probe, plain_chars = pdf_plain_text_probe(data)
-                    if plain_chars >= 40:
-                        parsed = parse_invoice_text(text_probe)
-                        for row in parsed:
-                            row["archivo_origen"] = name
-                        return {
-                            "name": name,
-                            "kind": "pdf",
-                            "text": text_probe or "",
-                            "rows": parsed,
-                            "candidates": extract_invoice_rows_from_text(text_probe or ""),
-                            "columns": None,
-                            "error": None,
-                        }
+                    # Aunque el PDF tenga texto, se intenta Vision primero para
+                    # conservar la estructura de la tabla; el texto queda de respaldo.
                     images = pdf_page_images(data)
             else:
                 images = [image_file_to_pil(data)]
 
-            rows, vision_text = try_vision_extract(images, source_name=name)
+            rows, vision_text = try_vision_extract(
+                images,
+                source_name=name,
+                model=(ollama_settings or {}).get("model"),
+            )
             if rows:
                 return {
                     "name": name,
@@ -1390,7 +1402,10 @@ def load_invoice_uploaded_file(
                 ) from exc
 
     # Fallback Tesseract / texto PDF
-    invoice_text, invoice_kind = read_document(uploaded_file)
+    if ext in {".txt", ".csv"}:
+        invoice_kind = "text"
+    else:
+        invoice_text, invoice_kind = read_document(uploaded_file)
     if vision_error:
         invoice_text = (
             f"[Vision no usado/falló: {vision_error}]\n\n{invoice_text or ''}"
@@ -1470,7 +1485,7 @@ def render_download_panel(auto_open_folder: bool = False, key_prefix: str = "mai
     xlsx_name = st.session_state.get("xlsx_name", "Effi_Importacion.xlsx")
     size_mb = len(xlsx_bytes) / (1024 * 1024)
 
-    st.markdown("### ⬇️ Descargar archivo para Effi")
+    st.markdown("### Descargar archivo para Effi")
     st.caption(f"{xlsx_name} · {size_mb:.2f} MB (límite Effi: 5 MB)")
 
     st.download_button(
@@ -1559,7 +1574,7 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
         row = raw.to_dict()
         desc = str(row.get("description", "") or "")
         pres = str(row.get("presentation", "") or "")
-        code = clean_gtin(row.get("code", ""))
+        code = clean_product_code(row.get("code", ""))
 
         # Exact GTIN first (mapa O(1), sin filtrar el DataFrame en cada línea)
         catalog_row = None
@@ -1570,12 +1585,20 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
             score = 1.0
             method = "GTIN exacto"
 
+        if catalog_row is None and code in catalog_index.get("reference_map", {}):
+            catalog_row = catalog_df.loc[catalog_index["reference_map"][code]]
+            score = 1.0
+            method = "Código exacto"
+
         if catalog_row is None:
             catalog_row, score, method = match_catalog_item(
                 desc, pres, catalog_df, catalog_cols, catalog_index=catalog_index
             )
 
         qty = parse_number(row.get("quantity")) or 0.0
+        bonus_qty = parse_number(
+            row.get("bonus_quantity", row.get("cantidad_bonificada"))
+        ) or 0.0
         unit_inv = parse_number(row.get("unit_price_invoice")) or 0.0
         total = parse_number(row.get("total_invoice"))
         if total is None:
@@ -1640,7 +1663,12 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
         gtin = (
             clean_gtin(catalog_row.get(catalog_cols["gtin"], ""))
             if catalog_cols["gtin"]
-            else code
+            else ""
+        )
+        reference = (
+            clean_product_code(catalog_row.get(catalog_cols["reference"], ""))
+            if catalog_cols.get("reference")
+            else ""
         )
         effi_id = (
             str(catalog_row.get(catalog_cols["effi"], "") or "")
@@ -1652,12 +1680,14 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
         doc_base, doc_kind = presentation_base_quantity(f"{pres} {desc}")
         cat_base, cat_kind = presentation_base_quantity(f"{cpres} {cdesc}")
         qty_adjusted = qty
+        bonus_qty_adjusted = bonus_qty
         unit_conversion_factor = 1.0
 
         if doc_base and cat_base and doc_kind == cat_kind and cat_base > 0:
             # A line quantity is transformed into equivalent catalog presentations.
             unit_conversion_factor = doc_base / cat_base
             qty_adjusted = qty * unit_conversion_factor
+            bonus_qty_adjusted = bonus_qty * unit_conversion_factor
             if abs(unit_conversion_factor - 1.0) > 1e-9:
                 # Preserve total paid: unit cost becomes proportional to the adjusted physical quantity.
                 conversions.append(
@@ -1712,9 +1742,9 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
             # Pure bonus with no direct cost: retain as a line only if catalog exists.
             # The preferred grouped X+Y treatment is handled below when explicit quantities are known.
 
-        # Effective unit base before item discount.
-        if qty_adjusted > 0:
-            unit_base = base_total / qty_adjusted
+        physical_qty = qty_adjusted + bonus_qty_adjusted
+        if physical_qty > 0:
+            unit_base = base_total / physical_qty
         else:
             unit_base = 0.0
 
@@ -1728,12 +1758,12 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
 
         main_rows.append(
             [
-                gtin or effi_id,
+                effi_id or gtin or reference or code,
                 "",
                 "",
                 "",
                 cdesc,
-                round(qty_adjusted, 6),
+                round(physical_qty, 6),
                 round(unit_base, 6),
                 round(disc_value, 6),
                 tax_code,
@@ -1762,6 +1792,8 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
                 "Método": method,
                 "Cantidad original": qty,
                 "Cantidad ajustada": qty_adjusted,
+                "Cantidad bonificada": bonus_qty_adjusted,
+                "Cantidad física total": physical_qty,
                 "Precio documento": unit_inv,
                 "Total documento": total,
                 "Base neta": base_total,
@@ -1925,7 +1957,7 @@ with st.sidebar:
             "Respaldo (solo si el parser no obtiene líneas)",
             "Siempre (priorizar Ollama)",
         ],
-        index=0,
+        index=1,
         disabled=not use_ollama,
         key="ollama_mode",
     )
@@ -1993,11 +2025,12 @@ if invoice_files:
     errors = []
     for uploaded in invoice_files:
         try:
-            meta = load_invoice_uploaded_file(
-                uploaded,
-                ollama_settings=ollama_settings,
-                read_mode=read_mode,
-            )
+            with st.spinner(f"Cargando y leyendo {uploaded.name}..."):
+                meta = load_invoice_uploaded_file(
+                    uploaded,
+                    ollama_settings=ollama_settings,
+                    read_mode=read_mode,
+                )
             loaded_files.append(meta)
             invoice_kinds.append(meta["kind"])
             if meta["text"]:
@@ -2063,6 +2096,7 @@ if catalog is not None and invoice_df is not None and not invoice_df.empty:
             "description",
             "presentation",
             "quantity",
+            "bonus_quantity",
             "unit_price_invoice",
             "total_invoice",
             "discount_pct",
@@ -2078,6 +2112,7 @@ if catalog is not None and invoice_df is not None and not invoice_df.empty:
         "description": "Nombre / descripción",
         "presentation": "Presentación",
         "quantity": "Cantidad",
+        "bonus_quantity": "Cantidad bonificada",
         "unit_price_invoice": "Valor unitario",
         "total_invoice": "Valor total",
         "discount_pct": "Descuento %",
@@ -2098,6 +2133,9 @@ if catalog is not None and invoice_df is not None and not invoice_df.empty:
             "Nombre / descripción": st.column_config.TextColumn("Nombre / descripción"),
             "Presentación": st.column_config.TextColumn("Presentación"),
             "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0, step=1),
+            "Cantidad bonificada": st.column_config.NumberColumn(
+                "Cantidad bonificada", min_value=0, step=1
+            ),
             "Valor unitario": st.column_config.NumberColumn("Valor unitario", format="%.2f"),
             "Valor total": st.column_config.NumberColumn("Valor total", format="%.2f"),
             "Descuento %": st.column_config.NumberColumn("Descuento %", format="%.2f"),
@@ -2187,7 +2225,7 @@ if catalog is not None and invoice_df is not None and not invoice_df.empty:
                 }
                 st.session_state["process_error"] = None
                 st.session_state["open_salidas"] = True
-                st.success("Procesado. El botón de descarga está arriba ↑")
+                st.success("Procesado. El botón de descarga está arriba")
                 st.rerun()
             except Exception as e:
                 logger.exception("Error fatal durante el procesamiento.")
@@ -2216,7 +2254,7 @@ if st.session_state.get("ready") and st.session_state.get("summary"):
     summary = st.session_state.get("summary") or {}
     if summary.get("Filas omitidas", 0) > 0:
         st.error(
-            f"⚠️ ALERTA: {summary['Filas omitidas']} ítem(s) fueron omitidos "
+            f"ALERTA: {summary['Filas omitidas']} ítem(s) fueron omitidos "
             "por no alcanzar el umbral o no tener coincidencia. "
             "Deben crearse previamente en Effi."
         )

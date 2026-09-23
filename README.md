@@ -100,7 +100,7 @@ Para mejorar la lectura de PDF escaneados e imágenes **sin API cloud**, use Oll
 2. Descargue el modelo por defecto:
 
 ```bash
-ollama pull moondream
+ollama pull qwen2.5vl:7b
 ```
 
 3. En la barra lateral de la app elija **Lectura de documentos**:
@@ -111,7 +111,7 @@ ollama pull moondream
 Variables opcionales en `.env` (ver `.env.example`):
 
 - `OLLAMA_BASE_URL=http://127.0.0.1:11434`
-- `OLLAMA_VISION_MODEL=moondream`
+- `OLLAMA_VISION_MODEL=qwen2.5vl:7b`
 
 ## Ejecutar la aplicación
 

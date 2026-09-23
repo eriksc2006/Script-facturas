@@ -24,8 +24,8 @@ def test_main_sheet_requires_nine_columns():
 
 
 def test_bonus_prorating():
-    # 10 paid + 2 free units, total paid = 100
-    assert calculate_prorated_unit_cost(100, 10, 2) == 100 / 12
+    # 10 paid + 3 free units, total paid = 100
+    assert calculate_prorated_unit_cost(100, 10, 3) == 100 / 13
 
 
 def test_full_bonus_discount():

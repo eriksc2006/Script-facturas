@@ -20,12 +20,14 @@ SYSTEM_PROMPT = (
     "Responde únicamente JSON válido con esta forma: "
     '{"tax_included": null, "items": ['
     '{"code": "", "description": "", "presentation": "", "quantity": 0, '
+    '"bonus_quantity": 0, '
     '"unit_price_invoice": 0, "total_invoice": 0, "discount_pct": null, '
     '"discount_value": null, "is_bonus": false, "source_line": ""}]}'
     " Reglas: extrae solo productos o servicios del documento; no inventes datos; "
     "code solo si el texto trae referencia, SKU, GTIN o EAN; nunca inventes "
     "códigos Effi ni IDs internos; is_bonus es true si es bonificación, obsequio, "
-    "gratis o línea con asterisco; usa punto decimal; omite encabezados, NIT, "
+    "gratis o línea con asterisco; bonus_quantity es la cantidad gratis asociada "
+    "a la misma línea pagada; usa punto decimal; omite encabezados, NIT, "
     "totales generales, IVA global, fletes y pie de página."
 )
 
@@ -219,6 +221,12 @@ def normalize_item(item: Any, source_name: str = "") -> dict[str, Any] | None:
     if not description and not code:
         return None
     qty = parse_number_loose(item.get("quantity", item.get("cantidad")))
+    bonus_qty = parse_number_loose(
+        item.get(
+            "bonus_quantity",
+            item.get("cantidad_bonificada", item.get("cantidad_bonus", 0)),
+        )
+    )
     unit = parse_number_loose(
         item.get("unit_price_invoice", item.get("precio_unitario"))
     )
@@ -232,6 +240,7 @@ def normalize_item(item: Any, source_name: str = "") -> dict[str, Any] | None:
         "description": description or code,
         "presentation": presentation.strip(),
         "quantity": qty,
+        "bonus_quantity": bonus_qty or 0.0,
         "unit_price_invoice": unit,
         "total_invoice": total,
         "discount_pct": parse_number_loose(item.get("discount_pct")),
