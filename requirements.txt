@@ -6,6 +6,7 @@ Pillow>=10,<13
 pytesseract>=0.3.10,<1
 rapidfuzz>=3.9,<4
 streamlit>=1.36,<2
+requests>=2.32,<3
 
 # Development / QA
 pytest>=8,<9

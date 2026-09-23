@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import sys
 import json
 import math
 import sys
@@ -16,6 +17,22 @@ import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+# Permitir importar src/effi_processor sin instalación editable.
+_SRC = Path(__file__).resolve().parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+try:
+    from effi_processor.vision_ollama import (
+        extract_invoice_rows_from_images,
+        ollama_available,
+        ollama_vision_model,
+    )
+except Exception:  # pragma: no cover
+    extract_invoice_rows_from_images = None
+    ollama_available = None
+    ollama_vision_model = lambda: "moondream"  # noqa: E731
 
 # Optional readers/OCR
 try:
@@ -318,6 +335,56 @@ def extract_text_from_image(file_bytes):
     return ocr_pil_image(img)
 
 
+def pdf_plain_text_probe(file_bytes):
+    """Texto nativo del PDF sin OCR (para decidir Vision vs texto)."""
+    if fitz is None:
+        raise RuntimeError("Instale PyMuPDF para procesar PDF: pip install pymupdf")
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    parts = []
+    for i, page in enumerate(doc):
+        parts.append(page.get_text("text") or "")
+    text = "\n".join(parts)
+    return text, len(text.strip())
+
+
+def pdf_page_images(file_bytes, max_pages: int = 8):
+    """Renderiza páginas PDF a imágenes PIL (para Vision / OCR)."""
+    if fitz is None:
+        raise RuntimeError("Instale PyMuPDF para procesar PDF: pip install pymupdf")
+    if Image is None:
+        raise RuntimeError("Instale Pillow: pip install Pillow")
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    images = []
+    for i, page in enumerate(doc):
+        if i >= max_pages:
+            break
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+        images.append(Image.open(io.BytesIO(pix.tobytes("png"))))
+    return images
+
+
+def image_file_to_pil(file_bytes):
+    if Image is None:
+        raise RuntimeError("Instale Pillow: pip install Pillow")
+    return Image.open(io.BytesIO(file_bytes))
+
+
+def check_ollama_vision():
+    if ollama_available is None:
+        return False, "Módulo Vision no disponible."
+    return ollama_available()
+
+
+def try_vision_extract(images, source_name: str):
+    """Intenta extracción Vision; lanza si falla."""
+    if extract_invoice_rows_from_images is None:
+        raise RuntimeError("Módulo Vision Ollama no importado.")
+    ok, msg = check_ollama_vision()
+    if not ok:
+        raise RuntimeError(msg)
+    return extract_invoice_rows_from_images(images, source_name=source_name)
+
+
 def read_document(uploaded_file):
     ext = Path(uploaded_file.name).suffix.lower()
     data = uploaded_file.getvalue()
@@ -346,73 +413,168 @@ def read_catalog(uploaded_file):
     raise ValueError("El catálogo maestro debe ser CSV o Excel (xlsx|xlsm|xls|xlt).")
 
 
-def find_column(df, candidates):
+def find_column(df, candidates, *, exclude_substrings=None):
+    """
+    Busca columna por nombre.
+    1) coincidencia exacta normalizada
+    2) el candidato aparece dentro del nombre de columna (no al revés:
+       evita que 'ID' matchee 'Unidad' o 'Código' matchee 'Código Impuesto').
+    """
+    exclude_substrings = [normalize_text(x) for x in (exclude_substrings or [])]
     norm_map = {normalize_text(c): c for c in df.columns}
+
+    def _excluded(nc: str) -> bool:
+        return any(ex and ex in nc for ex in exclude_substrings)
+
     for candidate in candidates:
         n = normalize_text(candidate)
-        if n in norm_map:
+        if n in norm_map and not _excluded(n):
             return norm_map[n]
-    for c in df.columns:
-        nc = normalize_text(c)
-        for candidate in candidates:
-            if normalize_text(candidate) in nc or nc in normalize_text(candidate):
+
+    for candidate in candidates:
+        n = normalize_text(candidate)
+        if len(n) < 3:
+            continue
+        for c in df.columns:
+            nc = normalize_text(c)
+            if _excluded(nc):
+                continue
+            if n in nc:
                 return c
     return None
 
 
+# Mapeo tarifa → Código Effi Impuesto (Colombia / plantillas Effi del proyecto).
+# 19% → 1 (confirmado en plantillas corregidas del usuario). 0% → vacío.
+DEFAULT_EFFI_TAX_BY_RATE = {
+    0.0: "",
+    0.05: "2",
+    0.19: "1",
+}
+
+
 def detect_catalog_columns(df):
     return {
-        "gtin": find_column(
-            df,
-            [
-                "GTIN",
-                "Código de barras",
-                "Codigo de barras",
-                "EAN",
-                "Código",
-                "Codigo",
-                "Barcode",
-            ],
-        ),
-        "effi": find_column(
-            df,
-            [
-                "ID EFFI",
-                "Código EFFI",
-                "Codigo EFFI",
-                "ID",
-                "ID Artículo",
-                "Articulo ID",
-            ],
-        ),
-        "description": find_column(
-            df,
-            [
-                "Descripción",
-                "Descripcion",
-                "Artículo",
-                "Articulo",
-                "Nombre",
-                "Producto",
-            ],
-        ),
-        "presentation": find_column(
-            df,
-            [
-                "Presentación",
-                "Presentacion",
-                "Empaque",
-                "Unidad",
-                "Contenido",
-                "Tamaño",
-                "Tamano",
-            ],
-        ),
+        "gtin": find_column(df, [
+            "COD. BARRAS GTIN", "Código de barras GTIN", "Codigo de barras GTIN",
+            "GTIN", "Código de barras", "Codigo de barras", "EAN", "Barcode",
+            "COD. BARRAS", "Código", "Codigo",
+        ]),
+        "effi": find_column(df, [
+            "ID EFFI", "Código EFFI", "Codigo EFFI", "ID Artículo", "Articulo ID", "ID",
+        ]),
+        "description": find_column(df, [
+            "Descripción", "Descripcion", "Nombre", "Artículo", "Articulo", "Producto",
+        ]),
+        "presentation": find_column(df, [
+            "Presentación", "Presentacion", "Empaque", "Contenido", "Tamaño", "Tamano", "Unidad",
+        ]),
         "brand": find_column(df, ["Marca", "Brand"]),
-        "tax": find_column(
-            df, ["IVA", "Impuesto", "Código Impuesto", "Codigo Impuesto"]
-        ),
+        # Solo columnas de CÓDIGO de impuesto; nunca precios con la palabra impuesto/IVA.
+        "tax": find_column(df, [
+            "Código Effi Impuesto", "Codigo Effi Impuesto",
+            "Código Impuesto", "Codigo Impuesto",
+            "ID Impuesto", "Impuesto ID", "ID IVA",
+        ], exclude_substrings=["precio", "tarifa", "utilidad", "valor"]),
+        "price_net": find_column(df, [
+            "Precio: TARIFA NORMAL", "Precio TARIFA NORMAL",
+            "Precio neto", "Precio sin impuesto", "Precio sin IVA",
+        ], exclude_substrings=["impuesto", "iva", "utilidad", "+"]),
+        "price_gross": find_column(df, [
+            "Precio + impuesto: TARIFA NORMAL",
+            "Precio + impuesto TARIFA NORMAL",
+            "Precio + impuesto",
+            "Precio con impuesto",
+            "Precio con IVA",
+            "Precio IVA incluido",
+        ], exclude_substrings=["utilidad", "mayorista"]),
     }
+
+
+def looks_like_effi_tax_code(value):
+    """Códigos Effi de impuesto son IDs cortos (ej. 1), no precios ni tarifas."""
+    if value is None:
+        return False
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return False
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".", 1)[0]
+    if not re.fullmatch(r"\d{1,4}", s):
+        return False
+    return 1 <= int(s) <= 9999
+
+
+def infer_tax_rate_from_catalog_prices(net_value, gross_value):
+    net = parse_number(net_value)
+    gross = parse_number(gross_value)
+    if net is None or gross is None or net <= 0 or gross < 0:
+        return None
+    if abs(gross - net) < 1e-6:
+        return 0.0
+    rate = (gross / net) - 1.0
+    if rate < -0.01 or rate > 1.0:
+        return None
+    # Normalizar a tarifas colombianas conocidas
+    for known in (0.0, 0.05, 0.19):
+        if abs(rate - known) <= 0.015:
+            return known
+    return round(rate, 4)
+
+
+def map_rate_to_effi_tax_code(rate, tax_by_rate=None, default_code="1"):
+    mapping = dict(DEFAULT_EFFI_TAX_BY_RATE)
+    if tax_by_rate:
+        mapping.update(tax_by_rate)
+    if rate is None:
+        return str(default_code)
+    best_code = None
+    best_diff = 1e9
+    for known_rate, code in mapping.items():
+        diff = abs(float(known_rate) - float(rate))
+        if diff < best_diff:
+            best_diff = diff
+            best_code = code
+    if best_diff <= 0.02:
+        return "" if best_code is None else str(best_code)
+    return str(default_code)
+
+
+def resolve_effi_tax_code(catalog_row, cols, settings=None):
+    """
+    Obtiene el Código Effi Impuesto desde el maestro Effi:
+    1) columna explícita de código (si es un ID válido)
+    2) tarifa inferida de Precio vs Precio+impuesto del catálogo
+    3) fallback al IVA configurado en la UI
+    """
+    settings = settings or {}
+    default_code = str(settings.get("default_tax_code", "1"))
+    tax_by_rate = settings.get("tax_by_rate")
+
+    if cols.get("tax"):
+        raw = catalog_row.get(cols["tax"], "")
+        if looks_like_effi_tax_code(raw):
+            s = str(raw).strip()
+            if re.fullmatch(r"\d+\.0+", s):
+                s = s.split(".", 1)[0]
+            return s, "columna código impuesto Effi", None
+
+    rate = None
+    source = "fallback UI"
+    if cols.get("price_net") and cols.get("price_gross"):
+        rate = infer_tax_rate_from_catalog_prices(
+            catalog_row.get(cols["price_net"]),
+            catalog_row.get(cols["price_gross"]),
+        )
+        if rate is not None:
+            source = "precio vs precio+impuesto Effi"
+
+    if rate is None:
+        rate = float(settings.get("tax_rate", 0.19) or 0.19)
+        source = "IVA configurado UI"
+
+    code = map_rate_to_effi_tax_code(rate, tax_by_rate=tax_by_rate, default_code=default_code)
+    return code, source, rate
 
 
 def clean_gtin(value):
@@ -499,45 +661,67 @@ def build_catalog_index(catalog, cols):
     return {"gtin_map": gtin_map, "texts": texts, "indices": indices}
 
 
+def _token_overlap_score(a: str, b: str) -> float:
+    sa = set(normalize_text(a).split())
+    sb = set(normalize_text(b).split())
+    if not sa or not sb:
+        return 0.0
+    overlap = len(sa & sb)
+    union = len(sa | sb)
+    return overlap / max(1, union)
+
+
 def match_catalog_item(description, presentation, catalog, cols, catalog_index=None):
     query = f"{description or ''} {presentation or ''}".strip()
     qn = normalize_text(query)
     if not qn:
         return None, 0, "Sin descripción"
 
-    # GTIN embebido en la descripción (prioridad máxima)
     qgt = clean_gtin(description)
     if qgt and catalog_index and qgt in catalog_index["gtin_map"]:
         idx = catalog_index["gtin_map"][qgt]
         return catalog.loc[idx], 1.0, "GTIN en descripción"
 
+    query_tokens = set(qn.split())
+    best_row = None
+    best_score = 0.0
+    best_method = "Fuzzy"
+
     if catalog_index and catalog_index["texts"]:
         texts = catalog_index["texts"]
         indices = catalog_index["indices"]
+
+        for pos, text in enumerate(texts):
+            idx = indices[pos]
+            text_tokens = set(text.split())
+            token_overlap = len(query_tokens & text_tokens) / max(1, len(query_tokens | text_tokens))
+            sim = similarity(qn, text)
+            score = max(sim, token_overlap * 0.9)
+
+            # Penalizar si el texto parece una firma/encabezado o un campo genérico.
+            if re.search(r"\b(factura|subtotal|total|iva|cliente|nit|telefono|direccion)\b", text):
+                score *= 0.4
+
+            if score > best_score:
+                best_score = score
+                best_row = catalog.loc[idx]
+                best_method = "token" if token_overlap > sim else "Fuzzy"
+
+        if best_row is not None and best_score >= 0.35:
+            return best_row, best_score, best_method
+
         if rf_process and fuzz:
             result = rf_process.extractOne(
                 qn,
                 texts,
                 scorer=fuzz.token_set_ratio,
-                score_cutoff=1,
+                score_cutoff=20,
             )
-            if result is None:
-                return None, 0, "Fuzzy"
-            _match, score100, pos = result
-            return catalog.loc[indices[pos]], score100 / 100.0, "Fuzzy"
+            if result is not None:
+                _match, score100, pos = result
+                return catalog.loc[indices[pos]], score100 / 100.0, "Fuzzy"
 
-        best = None
-        best_score = 0
-        for pos, text in enumerate(texts):
-            score = similarity(qn, text)
-            if score > best_score:
-                best_score = score
-                best = indices[pos]
-        return (catalog.loc[best] if best is not None else None), best_score, "Fuzzy"
-
-    # Fallback legacy (sin índice)
-    best = None
-    best_score = 0
+    # Fallback legacy con búsqueda más flexible por nombre y presentación.
     for idx, row in catalog.iterrows():
         text = " ".join(
             str(row.get(cols[k], "") or "")
@@ -545,14 +729,22 @@ def match_catalog_item(description, presentation, catalog, cols, catalog_index=N
             if cols.get(k)
         )
         score = similarity(query, text)
+        token_overlap = _token_overlap_score(query, text)
+        score = max(score, token_overlap * 0.9)
+
         if qgt and cols.get("gtin"):
             cgt = clean_gtin(row.get(cols["gtin"], ""))
-            if qgt and cgt and qgt == cgt:
+            if cgt and qgt == cgt:
                 score = 1.0
+
         if score > best_score:
             best_score = score
-            best = idx
-    return (catalog.loc[best] if best is not None else None), best_score, "Fuzzy"
+            best_row = row
+            best_method = "token" if token_overlap > 0.35 else "Fuzzy"
+
+    if best_row is None:
+        return None, 0, "Sin coincidencia"
+    return best_row, best_score, best_method
 
 
 def infer_columns_from_invoice_df(df):
@@ -1093,10 +1285,15 @@ def spreadsheet_rows_from_df(invoice_df_raw, source_name=""):
     return normalized_rows, inv_cols
 
 
-def load_invoice_uploaded_file(uploaded_file, ollama_settings=None):
+def load_invoice_uploaded_file(
+    uploaded_file,
+    ollama_settings=None,
+    read_mode: str = "Auto (Vision si hay Ollama)",
+):
     """Lee una factura (PDF/imagen/Excel/CSV/TXT) y devuelve filas normalizadas + metadatos."""
     name = uploaded_file.name
-    size = len(uploaded_file.getvalue())
+    data = uploaded_file.getvalue()
+    size = len(data)
     ext = Path(name).suffix.lower()
 
     # Validar tamaño solo para archivos Excel de entrada tipo plantilla Effi
@@ -1106,13 +1303,21 @@ def load_invoice_uploaded_file(uploaded_file, ollama_settings=None):
             "Effi limita la importación a 5 MB."
         )
 
-    invoice_text, invoice_kind = read_document(uploaded_file)
-    if invoice_kind == "spreadsheet":
-        raw = pd.read_excel(io.BytesIO(uploaded_file.getvalue()), dtype=str)
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+    use_vision = read_mode in {
+        "Auto (Vision si hay Ollama)",
+        "Solo Vision",
+    }
+    force_tesseract = read_mode == "Solo Tesseract"
+    vision_only = read_mode == "Solo Vision"
+
+    # Spreadsheet / texto plano: sin Vision
+    if ext in {".xlsx", ".xls", ".xlsm", ".xlt"}:
+        raw = pd.read_excel(io.BytesIO(data), dtype=str)
         rows, inv_cols = spreadsheet_rows_from_df(raw, source_name=name)
         return {
             "name": name,
-            "kind": invoice_kind,
+            "kind": "spreadsheet",
             "text": "",
             "rows": rows,
             "candidates": [],
@@ -1121,6 +1326,77 @@ def load_invoice_uploaded_file(uploaded_file, ollama_settings=None):
             "ollama_tax_included": None,
             "error": None,
         }
+    if ext in {".txt", ".csv"}:
+        invoice_text = data.decode("utf-8", errors="replace")
+        parsed = parse_invoice_text(invoice_text)
+        for row in parsed:
+            row["archivo_origen"] = name
+        return {
+            "name": name,
+            "kind": "text",
+            "text": invoice_text,
+            "rows": parsed,
+            "candidates": extract_invoice_rows_from_text(invoice_text),
+            "columns": None,
+            "error": None,
+        }
+
+    # PDF / imagen: Vision opcional + fallback Tesseract
+    images = None
+    vision_error = None
+    if use_vision and not force_tesseract and ext in (image_exts | {".pdf"}):
+        try:
+            if ext == ".pdf":
+                if vision_only:
+                    images = pdf_page_images(data)
+                else:
+                    text_probe, plain_chars = pdf_plain_text_probe(data)
+                    if plain_chars >= 40:
+                        parsed = parse_invoice_text(text_probe)
+                        for row in parsed:
+                            row["archivo_origen"] = name
+                        return {
+                            "name": name,
+                            "kind": "pdf",
+                            "text": text_probe or "",
+                            "rows": parsed,
+                            "candidates": extract_invoice_rows_from_text(text_probe or ""),
+                            "columns": None,
+                            "error": None,
+                        }
+                    images = pdf_page_images(data)
+            else:
+                images = [image_file_to_pil(data)]
+
+            rows, vision_text = try_vision_extract(images, source_name=name)
+            if rows:
+                return {
+                    "name": name,
+                    "kind": "vision-ollama",
+                    "text": vision_text,
+                    "rows": rows,
+                    "candidates": [],
+                    "columns": None,
+                    "error": None,
+                }
+            vision_error = "Vision no devolvió ítems estructurados."
+            if vision_only:
+                raise RuntimeError(vision_error)
+        except Exception as exc:
+            vision_error = str(exc)
+            if vision_only:
+                raise RuntimeError(
+                    f"Vision LLM falló para '{name}': {vision_error}"
+                ) from exc
+
+    # Fallback Tesseract / texto PDF
+    invoice_text, invoice_kind = read_document(uploaded_file)
+    if vision_error:
+        invoice_text = (
+            f"[Vision no usado/falló: {vision_error}]\n\n{invoice_text or ''}"
+        )
+        if invoice_kind in {"ocr", "pdf-ocr"}:
+            invoice_kind = f"{invoice_kind}+vision-fallback"
 
     candidates = extract_invoice_rows_from_text(invoice_text or "")
     parsed = parse_invoice_text(invoice_text or "")
@@ -1177,7 +1453,7 @@ def load_invoice_uploaded_file(uploaded_file, ollama_settings=None):
         "columns": None,
         "ollama_message": ollama_message,
         "ollama_tax_included": ollama_tax_included,
-        "error": None,
+        "error": vision_error or None,
     }
 
 
@@ -1343,6 +1619,20 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
                 }
             )
             logger.warning("Item omitido línea %s: %s | score=%.3f", i + 1, desc, score)
+
+            # Mantener la línea en el Excel final como registro editable aunque no haya coincidencia
+            # exacta con el catálogo. Esto evita que el documento salga vacío y permite corregirlo.
+            main_rows.append([
+                code or "",
+                "",
+                "",
+                "",
+                desc,
+                round(float(qty or 0), 6),
+                round(float(unit_inv or 0), 6),
+                0.0,
+                "",
+            ])
             continue
 
         cdesc = str(catalog_row.get(catalog_cols["description"], desc))
@@ -1431,12 +1721,10 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
         if disc_value == 0 and disc_pct == 0:
             disc_value = 0.0
 
-        # Tax code: 1 by requested default, unless master has a code.
-        tax_code = "1"
-        if catalog_cols["tax"]:
-            candidate_tax = str(catalog_row.get(catalog_cols["tax"], "") or "").strip()
-            if candidate_tax:
-                tax_code = candidate_tax
+        # Código Effi Impuesto: desde maestro Effi (código explícito o tarifa precio/precio+impuesto).
+        tax_code, tax_source, inferred_rate = resolve_effi_tax_code(
+            catalog_row, catalog_cols, settings
+        )
 
         main_rows.append(
             [
@@ -1479,8 +1767,9 @@ def process(catalog_df, catalog_cols, invoice_df, settings, logger):
                 "Base neta": base_total,
                 "Descuento": disc_value,
                 "Precio base unitario": unit_base,
-                "IVA": tax_rate,
+                "IVA": inferred_rate if inferred_rate is not None else tax_rate,
                 "Código impuesto": tax_code,
+                "Origen impuesto": tax_source,
             }
         )
 
@@ -1537,19 +1826,51 @@ render_download_panel(
 )
 
 ocr_ok, ocr_msg = configure_tesseract()
+ollama_ok, ollama_msg = check_ollama_vision()
 
 with st.sidebar:
     st.header("Configuración")
+    read_mode = st.selectbox(
+        "Lectura de documentos",
+        [
+            "Auto (Vision si hay Ollama)",
+            "Solo Vision",
+            "Solo Tesseract",
+        ],
+        help=(
+            "Vision usa Ollama en local (gratis, sin API cloud). "
+            f"Modelo: {ollama_vision_model()}."
+        ),
+    )
     tax_mode = st.selectbox("Tratamiento del IVA", ["Auto", "Incluye IVA", "Neto"])
     tax_rate = st.number_input(
-        "IVA", min_value=0.0, max_value=1.0, value=0.19, step=0.01, format="%.2f"
+        "IVA",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.19,
+        step=0.01,
+        format="%.2f",
     )
+    default_tax_code = st.text_input(
+        "Código Effi Impuesto por defecto (si no se puede inferir)",
+        value="1",
+        help="En tus plantillas Effi, IVA 19% usa código 1. El maestro puede sobrescribirlo.",
+    ).strip() or "1"
     auto_tax_included = st.checkbox(
         "En modo Auto, asumir IVA incluido si el documento lo indica", True
     )
     match_threshold = st.slider("Umbral mínimo de coincidencia", 0.50, 0.99, 0.82, 0.01)
     st.info("Los productos bajo el umbral NO se agregan a la hoja principal.")
     st.caption("Importación Effi: formatos xlsx · xlsm · xls · xlt · máx. 5 MB")
+    st.caption(
+        "Privacidad Vision: las facturas se procesan en localhost (Ollama); "
+        "no se envían a APIs en la nube."
+    )
+    if ollama_ok:
+        st.success(f"Vision: {ollama_msg}")
+    else:
+        st.warning(f"Vision: {ollama_msg}")
+        st.code(f"ollama pull {ollama_vision_model()}", language="bash")
     if ocr_ok:
         st.success(f"OCR: {ocr_msg}")
     else:
@@ -1634,13 +1955,25 @@ if catalog_file:
         ccols = detect_catalog_columns(catalog)
         st.success(f"Catálogo cargado: {len(catalog):,} filas.")
         st.json(ccols)
-        missing = [
-            k for k, v in ccols.items() if v is None and k in ("gtin", "description")
-        ]
-        if missing:
-            st.error(
-                f"Columnas esenciales no detectadas: {missing}. Revise el catálogo."
+        if ccols.get("price_net") and ccols.get("price_gross"):
+            st.caption(
+                "Impuesto Effi: se inferirá con "
+                f"`{ccols['price_net']}` vs `{ccols['price_gross']}` "
+                "(ej. 19% → código 1; 0% → vacío)."
             )
+        elif ccols.get("tax"):
+            st.caption(f"Impuesto Effi: columna de código detectada `{ccols['tax']}`.")
+        else:
+            st.warning(
+                "El catálogo no trae código de impuesto ni par precio/precio+impuesto. "
+                f"Se usará el código por defecto `{default_tax_code}`."
+            )
+        missing = [k for k, v in ccols.items() if v is None and k in ("gtin", "description")]
+        # description o nombre es esencial; gtin puede faltar si hay ID Effi
+        if ccols.get("description") is None:
+            st.error("Columna de descripción/nombre no detectada. Revise el catálogo.")
+        if ccols.get("gtin") is None and ccols.get("effi") is None:
+            st.error("No se detectó GTIN ni ID Effi. Revise el catálogo.")
     except Exception as e:
         st.error(f"Error leyendo catálogo: {e}")
         catalog = None
@@ -1660,7 +1993,11 @@ if invoice_files:
     errors = []
     for uploaded in invoice_files:
         try:
-            meta = load_invoice_uploaded_file(uploaded, ollama_settings=ollama_settings)
+            meta = load_invoice_uploaded_file(
+                uploaded,
+                ollama_settings=ollama_settings,
+                read_mode=read_mode,
+            )
             loaded_files.append(meta)
             invoice_kinds.append(meta["kind"])
             if meta["text"]:
@@ -1734,7 +2071,41 @@ if catalog is not None and invoice_df is not None and not invoice_df.empty:
         ]
         if c in invoice_df.columns
     ]
-    st.dataframe(invoice_df[display_cols], use_container_width=True, height=360)
+
+    display_labels = {
+        "archivo_origen": "Archivo origen",
+        "code": "Código",
+        "description": "Nombre / descripción",
+        "presentation": "Presentación",
+        "quantity": "Cantidad",
+        "unit_price_invoice": "Valor unitario",
+        "total_invoice": "Valor total",
+        "discount_pct": "Descuento %",
+        "is_bonus": "Es bonificación",
+        "source_line": "Línea fuente",
+    }
+
+    display_df = invoice_df[display_cols].rename(columns=display_labels)
+    edited_display_df = st.data_editor(
+        display_df,
+        use_container_width=True,
+        height=360,
+        num_rows="dynamic",
+        key="invoice_editor",
+        column_config={
+            "Archivo origen": st.column_config.TextColumn("Archivo origen"),
+            "Código": st.column_config.TextColumn("Código"),
+            "Nombre / descripción": st.column_config.TextColumn("Nombre / descripción"),
+            "Presentación": st.column_config.TextColumn("Presentación"),
+            "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0, step=1),
+            "Valor unitario": st.column_config.NumberColumn("Valor unitario", format="%.2f"),
+            "Valor total": st.column_config.NumberColumn("Valor total", format="%.2f"),
+            "Descuento %": st.column_config.NumberColumn("Descuento %", format="%.2f"),
+            "Es bonificación": st.column_config.CheckboxColumn("Es bonificación"),
+            "Línea fuente": st.column_config.TextColumn("Línea fuente"),
+        },
+    )
+    invoice_df = edited_display_df.rename(columns={v: k for k, v in display_labels.items()})
 
     by_file = (
         invoice_df.groupby("archivo_origen").size().reset_index(name="líneas")
@@ -1772,7 +2143,8 @@ if catalog is not None and invoice_df is not None and not invoice_df.empty:
             settings = {
                 "tax_rate": tax_rate,
                 "tax_mode": tax_mode,
-                "auto_tax_included": effective_auto_tax,
+                "auto_tax_included": auto_tax_included,
+                "default_tax_code": default_tax_code,
                 "match_threshold": match_threshold,
                 "additional_charges": find_additional_charges(invoice_text or ""),
             }

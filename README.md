@@ -10,7 +10,7 @@ Effi Processor permite:
 - Cargar un catálogo maestro Effi en CSV/XLSX.
 - Procesar una o varias facturas o listas de compra.
 - Trabajar con PDF, imágenes, Excel, CSV y TXT.
-- Extraer información mediante lectura de archivos y OCR para documentos escaneados/imágenes.
+- Extraer información mediante lectura de archivos, OCR (Tesseract) y Vision LLM local (Ollama) para documentos escaneados/imágenes.
 - Priorizar coincidencias por GTIN y utilizar coincidencia aproximada cuando no existe GTIN.
 - Normalizar presentaciones y unidades.
 - Resolver conversiones como g/ml/kg/L, galón y presentaciones equivalentes cuando la información disponible permite hacerlo.
@@ -27,8 +27,8 @@ El sistema **no debe inventar códigos Effi**. Cuando una coincidencia no alcanz
 ## Requisitos
 
 - Python >= 3.10
-- Tesseract OCR para procesamiento OCR
-- (Opcional) [Ollama](https://ollama.com) en local para extraer líneas de PDF/imagen/TXT sin APIs de pago
+- Tesseract OCR para procesamiento OCR (respaldo)
+- Ollama (opcional, recomendado) para Vision LLM local gratuito
 - Git
 - Windows, macOS o Linux
 
@@ -90,7 +90,28 @@ tesseract --list-langs
 
 Debe aparecer, como mínimo, `spa` y `eng`.
 
-> La configuración exacta de la ruta de Tesseract en Windows depende de la implementación actual de `app_effi.py`. No asumir una variable de entorno hasta confirmar que el código la consume.
+> La aplicación acepta `TESSERACT_CMD` / `TESSERACT_PATH` si Tesseract no está en el PATH.
+
+## Vision LLM local (Ollama, gratis)
+
+Para mejorar la lectura de PDF escaneados e imágenes **sin API cloud**, use Ollama en su PC. Las facturas se procesan en `localhost` y no se envían a internet.
+
+1. Instale [Ollama](https://ollama.com).
+2. Descargue el modelo por defecto:
+
+```bash
+ollama pull moondream
+```
+
+3. En la barra lateral de la app elija **Lectura de documentos**:
+   - `Auto (Vision si hay Ollama)` — intenta Vision y si falla usa Tesseract
+   - `Solo Vision` — exige Ollama
+   - `Solo Tesseract` — OCR clásico
+
+Variables opcionales en `.env` (ver `.env.example`):
+
+- `OLLAMA_BASE_URL=http://127.0.0.1:11434`
+- `OLLAMA_VISION_MODEL=moondream`
 
 ## Ejecutar la aplicación
 
