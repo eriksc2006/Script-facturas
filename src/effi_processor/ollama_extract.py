@@ -32,6 +32,71 @@ SYSTEM_PROMPT = (
 )
 
 
+def build_manual_extraction_prompt(manual_rules: dict[str, Any] | None = None) -> str:
+    """Append user-configured invoice search rules to the LLM prompt."""
+    rules = manual_rules or {}
+    code_cols = [
+        item.strip()
+        for item in str(rules.get("code_columns") or "").split(",")
+        if item.strip()
+    ] or ["Referencia", "Codigo", "Código", "GTIN", "EAN"]
+    desc_cols = [
+        item.strip()
+        for item in str(rules.get("description_columns") or "").split(",")
+        if item.strip()
+    ] or ["Descripcion", "Descripción", "Producto", "Articulo", "Artículo"]
+    qty_cols = [
+        item.strip()
+        for item in str(rules.get("quantity_columns") or "").split(",")
+        if item.strip()
+    ] or ["Cantidad", "Cant.", "Cant"]
+    price_cols = [
+        item.strip()
+        for item in str(rules.get("unit_price_columns") or "").split(",")
+        if item.strip()
+    ] or ["Precio Unitario", "Precio ud.", "Precio", "Valor Unitario"]
+    total_cols = [
+        item.strip()
+        for item in str(rules.get("total_columns") or "").split(",")
+        if item.strip()
+    ] or ["Valor", "Valor Total", "Total", "Importe"]
+    discount_cols = [
+        item.strip()
+        for item in str(rules.get("discount_columns") or "").split(",")
+        if item.strip()
+    ] or ["Descuento", "Desc.", "Dto.", "% Descuento", "% Desc"]
+    bonus_markers = [
+        item.strip()
+        for item in str(rules.get("bonus_markers") or "*, bonificación, obsequio, gratis, regalo, bono").split(",")
+        if item.strip()
+    ]
+    discount_markers = [
+        item.strip()
+        for item in str(rules.get("discount_markers") or "descuento, dto, dcto, % descuento, valor descuento").split(",")
+        if item.strip()
+    ]
+    bonuses = ", ".join(bonus_markers)
+    discounts = ", ".join(discount_markers)
+    return (
+        "\nReglas manuales del usuario:\n"
+        f"- Busca código en columnas: {', '.join(code_cols)}.\n"
+        f"- Busca descripción en columnas: {', '.join(desc_cols)}.\n"
+        f"- Busca cantidad en columnas: {', '.join(qty_cols)}.\n"
+        f"- Busca precio unitario en columnas: {', '.join(price_cols)}.\n"
+        f"- Busca total en columnas: {', '.join(total_cols)}.\n"
+        f"- Busca descuento en columnas: {', '.join(discount_cols)}.\n"
+        f"- Las bonificaciones se representan con estos indicadores: {bonuses}. "
+        "Si una línea tiene un asterisco '*' o estas palabras, marca is_bonus=true y "
+        "deduce bonus_quantity como la cantidad gratis de la misma línea.\n"
+        f"- Los descuentos se identifican con estas palabras o columnas: {discounts}. "
+        "Si la línea incluye un descuento, calcula discount_pct o discount_value y "
+        "ajusta el costo neto antes de exportar.\n"
+        "- Si hay una cantidad pagada y otra bonificada, el precio unitario final debe "
+        "distribuirse sobre la cantidad total recibida (cantidad pagada + bonificada) y "
+        "mantener el total realmente pagado después del descuento."
+    )
+
+
 def default_host() -> str:
     return (os.environ.get("OLLAMA_HOST") or DEFAULT_HOST).strip().rstrip("/")
 
@@ -302,6 +367,7 @@ def extract_invoice_items(
     model: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     source_name: str = "",
+    manual_rules: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Ask a local Ollama model to structure invoice lines. No cloud API."""
     snippet = (text or "").strip()
@@ -333,7 +399,7 @@ def extract_invoice_items(
         "format": "json",
         "options": {"temperature": 0},
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": SYSTEM_PROMPT + build_manual_extraction_prompt(manual_rules)},
             {
                 "role": "user",
                 "content": (

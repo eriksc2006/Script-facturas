@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
     requests = None
 
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_VISION_MODEL = "qwen2.5vl:7b"
+DEFAULT_OLLAMA_VISION_MODEL = "qwen2.5vl:3b"
 VISION_TIMEOUT_SEC = 180
 
 
@@ -75,6 +75,47 @@ Reglas estrictas:
 - No inventes productos que no aparezcan en la imagen.
 - Si hay duda entre un campo de producto y un campo genérico, descarta el genérico.
 """
+
+
+def build_vision_prompt(manual_rules: dict[str, Any] | None = None) -> str:
+    """Append manual extraction instructions to the image-based extraction prompt."""
+    rules = manual_rules or {}
+    code_cols = [
+        item.strip()
+        for item in str(rules.get("code_columns") or "").split(",")
+        if item.strip()
+    ] or ["Referencia", "Codigo", "Código", "GTIN", "EAN"]
+    qty_cols = [
+        item.strip()
+        for item in str(rules.get("quantity_columns") or "").split(",")
+        if item.strip()
+    ] or ["Cantidad", "Cant.", "Cant"]
+    price_cols = [
+        item.strip()
+        for item in str(rules.get("unit_price_columns") or "").split(",")
+        if item.strip()
+    ] or ["Precio Unitario", "Precio ud.", "Precio", "Valor Unitario"]
+    discount_cols = [
+        item.strip()
+        for item in str(rules.get("discount_columns") or "").split(",")
+        if item.strip()
+    ] or ["Descuento", "Desc.", "Dto.", "% Descuento", "% Desc"]
+    bonus_markers = [
+        item.strip()
+        for item in str(rules.get("bonus_markers") or "*, bonificación, obsequio, gratis, regalo, bono").split(",")
+        if item.strip()
+    ]
+    return (
+        f"\nReglas manuales del usuario:\n"
+        f"- Busca código en columnas: {', '.join(code_cols)}.\n"
+        f"- Busca cantidad en columnas: {', '.join(qty_cols)}.\n"
+        f"- Busca precio unitario en columnas: {', '.join(price_cols)}.\n"
+        f"- Busca descuento en columnas: {', '.join(discount_cols)}.\n"
+        f"- Si una línea incluye alguno de estos indicadores de bonificación: {', '.join(bonus_markers)}, "
+        "marca is_bonus=true y usa bonus_quantity para la cantidad gratis.\n"
+        "- Si la línea lleva descuento o un asterisco asociado a la bonificación, corrige el costo "
+        "considerando la cantidad total recibida (pagada + bonificada) y el descuento real."
+    )
 
 
 def ollama_base_url() -> str:
@@ -280,6 +321,7 @@ def extract_invoice_from_image_b64(
     *,
     model: str | None = None,
     timeout: int = VISION_TIMEOUT_SEC,
+    manual_rules: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if requests is None:
         raise RuntimeError("Instale requests: pip install requests")
@@ -292,7 +334,7 @@ def extract_invoice_from_image_b64(
         "messages": [
             {
                 "role": "user",
-                "content": INVOICE_VISION_PROMPT,
+                "content": INVOICE_VISION_PROMPT + build_vision_prompt(manual_rules),
                 "images": [image_b64],
             }
         ],
@@ -328,9 +370,16 @@ def extract_invoice_rows_from_pil(
     *,
     source_name: str = "",
     model: str | None = None,
+    manual_rules: dict[str, Any] | None = None,
+    timeout: int = VISION_TIMEOUT_SEC,
 ) -> tuple[list[dict], str]:
     """Devuelve (filas_normalizadas, texto_auditoria)."""
-    payload = extract_invoice_from_image_b64(_pil_to_png_b64(img), model=model)
+    payload = extract_invoice_from_image_b64(
+        _pil_to_png_b64(img),
+        model=model,
+        manual_rules=manual_rules,
+        timeout=timeout,
+    )
     rows = normalize_vision_items(payload, source_name=source_name)
     raw_text = str(payload.get("raw_text") or "").strip()
     if not raw_text:
@@ -343,12 +392,18 @@ def extract_invoice_rows_from_images(
     *,
     source_name: str = "",
     model: str | None = None,
+    manual_rules: dict[str, Any] | None = None,
+    timeout: int = VISION_TIMEOUT_SEC,
 ) -> tuple[list[dict], str]:
     all_rows: list[dict] = []
     texts: list[str] = []
     for idx, img in enumerate(images, 1):
         rows, text = extract_invoice_rows_from_pil(
-            img, source_name=source_name, model=model
+            img,
+            source_name=source_name,
+            model=model,
+            manual_rules=manual_rules,
+            timeout=timeout,
         )
         all_rows.extend(rows)
         texts.append(f"--- PÁGINA {idx} (Vision) ---\n{text}")

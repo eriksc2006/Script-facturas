@@ -71,6 +71,11 @@ from effi_processor.ollama_extract import (  # noqa: E402
     select_extracted_rows,
     should_call_ollama,
 )
+from effi_processor.quality_rules import (  # noqa: E402
+    calculate_prorated_unit_cost,
+    is_bonus_marker,
+    normalize_manual_list,
+)
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -375,7 +380,13 @@ def check_ollama_vision(model=None):
     return ollama_available(model=model)
 
 
-def try_vision_extract(images, source_name: str, model=None):
+def try_vision_extract(
+    images,
+    source_name: str,
+    model=None,
+    manual_rules=None,
+    timeout: int = 180,
+):
     """Intenta extracción Vision; lanza si falla."""
     if extract_invoice_rows_from_images is None:
         raise RuntimeError("Módulo Vision Ollama no importado.")
@@ -383,7 +394,11 @@ def try_vision_extract(images, source_name: str, model=None):
     if not ok:
         raise RuntimeError(msg)
     return extract_invoice_rows_from_images(
-        images, source_name=source_name, model=model
+        images,
+        source_name=source_name,
+        model=model,
+        manual_rules=manual_rules,
+        timeout=timeout,
     )
 
 
@@ -777,58 +792,65 @@ def match_catalog_item(description, presentation, catalog, cols, catalog_index=N
     return best_row, best_score, best_method
 
 
-def infer_columns_from_invoice_df(df):
+def infer_columns_from_invoice_df(df, manual_rules=None):
+    manual_rules = manual_rules or {}
+
+    def custom_candidates(field_name, defaults, *, allow_default=True):
+        raw = manual_rules.get(field_name, "")
+        candidates = normalize_manual_list(raw)
+        if candidates:
+            return candidates
+        if allow_default:
+            return defaults
+        return []
+
     return {
-        "code": find_column(
-            df,
-            [
-                "Referencia",
-                "REF",
-                "Codigo",
-                "Código",
-                "GTIN",
-                "EAN",
-                "Barcode",
-                "Código de barras",
-                "SKU",
-            ],
-        ),
-        "description": find_column(
-            df,
-            [
-                "Descripcion",
-                "Descripción",
-                "Articulo",
-                "Artículo",
-                "Producto",
-                "Nombre",
-            ],
-        ),
-        "presentation": find_column(
-            df, ["Presentacion", "Presentación", "Empaque", "Unidad"]
-        ),
-        "info": find_column(df, ["Inf.", "Inf", "Información", "Info"]),
-        "quantity": find_column(df, ["Cantidad", "Cant.", "Cant"]),
-        "list_price": find_column(
-            df, ["Precio Lista", "Precio de lista", "Precio Lista Unitario", "P. Lista"]
-        ),
-        "unit_price": find_column(
-            df,
-            [
-                "Precio Unitario",
-                "PRECIO UNITARIO",
-                "Precio ud.",
-                "Precio",
-                "Valor Unitario",
-            ],
-        ),
-        "total": find_column(
-            df, ["Valor", "VALOR", "Precio Total", "Total", "Valor Total", "Importe"]
-        ),
-        "discount": find_column(
-            df, ["Descuento", "Desc.", "Dto.", "% Descuento", "% Desc"]
-        ),
-        "tax": find_column(df, ["IVA", "Impuesto", "Tax"]),
+        "code": find_column(df, custom_candidates("code_columns", [], allow_default=False)),
+        "description": find_column(df, custom_candidates("description_columns", [
+            "Descripcion",
+            "Descripción",
+            "Articulo",
+            "Artículo",
+            "Producto",
+            "Nombre",
+        ])),
+        "presentation": find_column(df, custom_candidates("presentation_columns", [
+            "Presentacion",
+            "Presentación",
+            "Empaque",
+            "Unidad",
+        ])),
+        "info": find_column(df, custom_candidates("info_columns", ["Inf.", "Inf", "Información", "Info"])),
+        "quantity": find_column(df, custom_candidates("quantity_columns", ["Cantidad", "Cant.", "Cant"])),
+        "list_price": find_column(df, custom_candidates("list_price_columns", [
+            "Precio Lista",
+            "Precio de lista",
+            "Precio Lista Unitario",
+            "P. Lista",
+        ])),
+        "unit_price": find_column(df, custom_candidates("unit_price_columns", [
+            "Precio Unitario",
+            "PRECIO UNITARIO",
+            "Precio ud.",
+            "Precio",
+            "Valor Unitario",
+        ])),
+        "total": find_column(df, custom_candidates("total_columns", [
+            "Valor",
+            "VALOR",
+            "Precio Total",
+            "Total",
+            "Valor Total",
+            "Importe",
+        ])),
+        "discount": find_column(df, custom_candidates("discount_columns", [
+            "Descuento",
+            "Desc.",
+            "Dto.",
+            "% Descuento",
+            "% Desc",
+        ])),
+        "tax": find_column(df, custom_candidates("tax_columns", ["IVA", "Impuesto", "Tax"])),
     }
 
 
@@ -1271,12 +1293,20 @@ def save_workbook(wb):
     return data
 
 
-def spreadsheet_rows_from_df(invoice_df_raw, source_name=""):
-    inv_cols = infer_columns_from_invoice_df(invoice_df_raw)
+def spreadsheet_rows_from_df(invoice_df_raw, source_name="", manual_rules=None):
+    manual_rules = manual_rules or {}
+    inv_cols = infer_columns_from_invoice_df(invoice_df_raw, manual_rules=manual_rules)
+    bonus_markers = normalize_manual_list(
+        manual_rules.get("bonus_markers", "*, bonificación, obsequio, gratis, regalo, bono")
+    )
     normalized_rows = []
     for _, r in invoice_df_raw.iterrows():
         code_raw = r.get(inv_cols["code"], "") if inv_cols["code"] else ""
-        is_bonus = "*" in str(code_raw) or "*" in " ".join(str(x) for x in r.tolist())
+        row_text = " ".join(str(x) for x in r.tolist() if str(x) != "nan")
+        is_bonus = any(
+            is_bonus_marker(str(value), bonus_markers)
+            for value in [code_raw, row_text, *[str(x) for x in r.tolist()]]
+        )
         normalized_rows.append(
             {
                 "archivo_origen": source_name,
@@ -1307,9 +1337,7 @@ def spreadsheet_rows_from_df(invoice_df_raw, source_name=""):
                 ),
                 "discount_value": "",
                 "is_bonus": is_bonus,
-                "source_line": " | ".join(
-                    str(x) for x in r.tolist() if str(x) != "nan"
-                ),
+                "source_line": row_text,
             }
         )
     return normalized_rows, inv_cols
@@ -1319,6 +1347,9 @@ def load_invoice_uploaded_file(
     uploaded_file,
     ollama_settings=None,
     read_mode: str = "Auto (Vision si hay Ollama)",
+    manual_rules=None,
+    vision_model_name: str | None = None,
+    vision_timeout: int = 180,
 ):
     """Lee una factura (PDF/imagen/Excel/CSV/TXT) y devuelve filas normalizadas + metadatos."""
     name = uploaded_file.name
@@ -1344,7 +1375,9 @@ def load_invoice_uploaded_file(
     # Spreadsheet / texto plano: sin Vision
     if ext in {".xlsx", ".xls", ".xlsm", ".xlt"}:
         raw = pd.read_excel(io.BytesIO(data), dtype=str)
-        rows, inv_cols = spreadsheet_rows_from_df(raw, source_name=name)
+        rows, inv_cols = spreadsheet_rows_from_df(
+            raw, source_name=name, manual_rules=manual_rules
+        )
         return {
             "name": name,
             "kind": "spreadsheet",
@@ -1379,7 +1412,9 @@ def load_invoice_uploaded_file(
             rows, vision_text = try_vision_extract(
                 images,
                 source_name=name,
-                model=(ollama_settings or {}).get("model"),
+                model=vision_model_name or (ollama_settings or {}).get("model"),
+                manual_rules=manual_rules,
+                timeout=vision_timeout,
             )
             if rows:
                 return {
@@ -1449,6 +1484,7 @@ def load_invoice_uploaded_file(
                 model=settings.get("model"),
                 timeout=float(settings.get("timeout") or 120),
                 source_name=name,
+                manual_rules=manual_rules,
             )
             cache[cache_key] = ollama_result
         ollama_message = ollama_result.get("message")
@@ -1860,8 +1896,55 @@ render_download_panel(
 ocr_ok, ocr_msg = configure_tesseract()
 ollama_ok, ollama_msg = check_ollama_vision()
 
+
+def build_manual_extraction_rules():
+    return {
+        "code_columns": st.text_input(
+            "Columnas para buscar código",
+            value="",
+            help="Déjalo vacío si quieres buscar el código solo manualmente y no detectar columnas por nombre por defecto.",
+        ),
+        "description_columns": st.text_input(
+            "Columnas para buscar descripción",
+            value="Descripcion, Descripción, Articulo, Artículo, Producto, Nombre",
+        ),
+        "quantity_columns": st.text_input(
+            "Columnas para buscar cantidad",
+            value="Cantidad, Cant., Cant",
+        ),
+        "unit_price_columns": st.text_input(
+            "Columnas para buscar precio unitario",
+            value="Precio Unitario, Precio ud., Precio, Valor Unitario",
+        ),
+        "total_columns": st.text_input(
+            "Columnas para buscar total",
+            value="Valor, Valor Total, Precio Total, Total, Importe",
+        ),
+        "discount_columns": st.text_input(
+            "Columnas para buscar descuento",
+            value="Descuento, Desc., Dto., % Descuento, % Desc",
+        ),
+        "bonus_markers": st.text_input(
+            "Indicadores de bonificación",
+            value="*, bonificación, obsequio, gratis, regalo, bono",
+            help="Si la línea lleva asterisco, 'gratis' o similar, se interpreta como bonificación.",
+        ),
+        "discount_markers": st.text_input(
+            "Indicadores de descuento",
+            value="descuento, dto, dcto, % descuento, valor descuento",
+            help="Se usa para identificar descuentos en texto o columnas del documento.",
+        ),
+    }
+
+
 with st.sidebar:
     st.header("Configuración")
+    st.subheader("Reglas manuales de extracción")
+    st.caption(
+        "Aquí puedes indicar cómo buscar columnas y cómo detectar bonificaciones/descuentos "
+        "cuando el documento no sigue el nombre estándar."
+    )
+    manual_extraction_rules = build_manual_extraction_rules()
     read_mode = st.selectbox(
         "Lectura de documentos",
         [
@@ -1871,8 +1954,20 @@ with st.sidebar:
         ],
         help=(
             "Vision usa Ollama en local (gratis, sin API cloud). "
-            f"Modelo: {ollama_vision_model()}."
+            f"Modelo por defecto: {ollama_vision_model()}."
         ),
+    )
+    vision_model_name = st.text_input(
+        "Modelo Vision Ollama",
+        value=ollama_vision_model(),
+        help="Usa un modelo más liviano si qwen2.5vl:7b tarda demasiado, por ejemplo qwen2.5vl:3b.",
+    )
+    vision_timeout = st.slider(
+        "Tiempo máximo Vision (segundos)",
+        min_value=30,
+        max_value=600,
+        value=180,
+        step=15,
     )
     tax_mode = st.selectbox("Tratamiento del IVA", ["Auto", "Incluye IVA", "Neto"])
     tax_rate = st.number_input(
@@ -2030,6 +2125,9 @@ if invoice_files:
                     uploaded,
                     ollama_settings=ollama_settings,
                     read_mode=read_mode,
+                    manual_rules=manual_extraction_rules,
+                    vision_model_name=vision_model_name,
+                    vision_timeout=vision_timeout,
                 )
             loaded_files.append(meta)
             invoice_kinds.append(meta["kind"])

@@ -121,6 +121,33 @@ streamlit run app_effi.py
 
 Streamlit mostrará la dirección local de la aplicación.
 
+## Parámetros manuales de extracción
+
+En la barra lateral de la aplicación hay una sección llamada `Reglas manuales de extracción` donde puedes escribir los nombres reales de las columnas y los indicadores de bonificación/descuento para cada factura.
+
+Campos disponibles:
+
+- `Columnas para buscar código` (puedes dejarlo vacío si prefieres no buscar código por nombre)
+- `Columnas para buscar descripción`
+- `Columnas para buscar cantidad`
+- `Columnas para buscar precio unitario`
+- `Columnas para buscar total`
+- `Columnas para buscar descuento`
+- `Indicadores de bonificación`
+- `Indicadores de descuento`
+
+Ejemplo de uso:
+
+```text
+Columnas para buscar código: 
+Columnas para buscar cantidad: Cantidad, Cant., Cant
+Columnas para buscar descuento: Descuento, Desc., Dto., % Descuento, % Desc
+Indicadores de bonificación: *, bonificación, obsequio, gratis, regalo, bono
+Indicadores de descuento: descuento, dto, dcto, % descuento, valor descuento
+```
+
+Con estos valores, la app reconoce cuando una línea lleva asterisco o una palabra como "gratis" y calcula el costo considerando la cantidad bonificada y el descuento aplicado.
+
 ## Flujo de trabajo
 
 1. Cargar el catálogo maestro de Effi.
