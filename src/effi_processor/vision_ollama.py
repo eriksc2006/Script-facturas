@@ -17,7 +17,34 @@ except Exception:  # pragma: no cover
 
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_VISION_MODEL = "qwen2.5vl:7b"
+ALT_FREE_VISION_MODELS = [
+    "qwen2.5vl:7b",
+    "llama3.2-vision:11b",
+    "llava:7b",
+    "bakllava:7b",
+]
 VISION_TIMEOUT_SEC = 180
+
+
+def pick_free_vision_model(model: str | None = None) -> str:
+    """Prefer a small free local model and keep the default fallback stable."""
+    requested = (model or os.environ.get("OLLAMA_VISION_MODEL") or DEFAULT_OLLAMA_VISION_MODEL).strip()
+    if requested:
+        return requested
+    return ALT_FREE_VISION_MODELS[0]
+
+
+def should_use_vision(file_ext: str | None, text_probe: str, *, min_chars: int = 60) -> bool:
+    """Use vision only when the native text is too sparse to be trusted."""
+    ext = (file_ext or "").lower().strip()
+    if ext in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
+        cleaned = re.sub(r"\s+", " ", (text_probe or "")).strip()
+        if len(cleaned) >= min_chars:
+            return False
+        return True
+    if ext in {".txt", ".csv", ".xlsx", ".xls", ".xlsm", ".xlt"}:
+        return False
+    return True
 
 
 def _load_dotenv_if_present() -> None:
@@ -82,7 +109,7 @@ def ollama_base_url() -> str:
 
 
 def ollama_vision_model() -> str:
-    return (os.environ.get("OLLAMA_VISION_MODEL") or DEFAULT_OLLAMA_VISION_MODEL).strip()
+    return pick_free_vision_model(os.environ.get("OLLAMA_VISION_MODEL"))
 
 
 def ollama_available(

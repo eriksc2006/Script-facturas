@@ -17,6 +17,8 @@ from app_effi import match_catalog_item  # noqa: E402
 from effi_processor.vision_ollama import (  # noqa: E402
     _extract_json_object,
     normalize_vision_items,
+    pick_free_vision_model,
+    should_use_vision,
 )
 
 
@@ -121,6 +123,28 @@ def test_normalize_filters_headers_and_totals_not_products():
     assert len(rows) == 1
     assert rows[0]["description"] == "ACEITE VEGETAL 1L"
     assert rows[0]["quantity"] == 2
+
+
+def test_should_use_vision_skips_when_text_is_already_dense():
+    rich_text = "\n".join([
+        "FACTURA",
+        "PRODUCTO 1  2  2500  5000",
+        "PRODUCTO 2  1  3500  3500",
+        "PRODUCTO 3  3  2100  6300",
+        "PRODUCTO 4  4  1800  7200",
+        "TOTAL 8500",
+    ])
+    assert should_use_vision("pdf", rich_text, min_chars=80) is False
+
+
+def test_should_use_vision_uses_vision_when_text_is_sparse():
+    assert should_use_vision("image", "TOTAL FACTURA", min_chars=80) is True
+
+
+def test_pick_free_vision_model_prefers_local_free_option():
+    model = pick_free_vision_model("qwen2.5vl:7b")
+    assert model == "qwen2.5vl:7b"
+    assert "qwen2.5vl" in pick_free_vision_model(None)
 
 
 def test_match_catalog_item_finds_similar_inventory_product():

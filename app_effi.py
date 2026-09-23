@@ -1364,36 +1364,37 @@ def load_invoice_uploaded_file(
     images = None
     vision_error = None
     if use_vision and not force_tesseract and ext in (image_exts | {".pdf"}):
+        text_probe = ""
         try:
             if ext == ".pdf":
-                if vision_only:
-                    images = pdf_page_images(data)
-                else:
-                    text_probe, plain_chars = pdf_plain_text_probe(data)
-                    # Aunque el PDF tenga texto, se intenta Vision primero para
-                    # conservar la estructura de la tabla; el texto queda de respaldo.
+                text_probe, _ = pdf_plain_text_probe(data)
+                if not vision_only and not should_use_vision(ext, text_probe, min_chars=60):
+                    use_vision = False
+                if use_vision:
                     images = pdf_page_images(data)
             else:
+                text_probe = ""
                 images = [image_file_to_pil(data)]
 
-            rows, vision_text = try_vision_extract(
-                images,
-                source_name=name,
-                model=(ollama_settings or {}).get("model"),
-            )
-            if rows:
-                return {
-                    "name": name,
-                    "kind": "vision-ollama",
-                    "text": vision_text,
-                    "rows": rows,
-                    "candidates": [],
-                    "columns": None,
-                    "error": None,
-                }
-            vision_error = "Vision no devolvió ítems estructurados."
-            if vision_only:
-                raise RuntimeError(vision_error)
+            if use_vision:
+                rows, vision_text = try_vision_extract(
+                    images,
+                    source_name=name,
+                    model=(ollama_settings or {}).get("model") or ollama_vision_model(),
+                )
+                if rows:
+                    return {
+                        "name": name,
+                        "kind": "vision-ollama",
+                        "text": vision_text,
+                        "rows": rows,
+                        "candidates": [],
+                        "columns": None,
+                        "error": None,
+                    }
+                vision_error = "Vision no devolvió ítems estructurados."
+                if vision_only:
+                    raise RuntimeError(vision_error)
         except Exception as exc:
             vision_error = str(exc)
             if vision_only:

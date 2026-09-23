@@ -75,3 +75,4 @@ La aplicación no debe inventar:
 - Productos.
 
 Ante una duda que no pueda resolverse de forma confiable, debe registrarse una alerta y, cuando corresponda, omitirse el artículo.
+ejecutalo
